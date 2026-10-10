@@ -89,6 +89,7 @@ $(error LoongArch QEMU virt 要求内存 >= 1G：CONFIG_QEMU_MEMORY_MB=$(QEMU_ME
 endif
 endif
 KERNEL_CMDLINE := $(CONFIG_KERNEL_CMDLINE)
+export KERNEL_MEMORY_MB := $(QEMU_MEMORY_MB)
 
 # ---------------------------------------------------------------------------
 # 产物与 Cargo 参数

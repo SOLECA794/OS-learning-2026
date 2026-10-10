@@ -2,6 +2,11 @@
 
 pub mod boot;
 pub mod console;
+pub mod mm;
+pub mod power;
+pub mod trap;
+
+pub use power::{power_off, restart};
 
 /// 架构名，仅用于日志与诊断（不参与行为决策）。
 pub const ARCH_NAME: &str = "riscv64";

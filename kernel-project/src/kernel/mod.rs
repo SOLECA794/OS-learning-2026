@@ -1,7 +1,7 @@
 //! 内核主流程（docs/01 §4 启动流程）。
 //!
-//! M0 只交付「boot 到 init」这一段：
-//!   arch 早期启动（汇编）→ kernel::main → 控制台初始化 → banner → 停机
+//! 当前启动链：
+//!   arch 早期启动（汇编）→ kernel::main → 控制台/trap 初始化 → mm::init → 停机
 //!
 //! 后续步骤按 docs/01 §4 依次接入，都在 M1：
 //!   kalloc::init → mm::init → driver::init/arch::init/fs::init → fs::mount_init_fs
@@ -12,6 +12,10 @@
 #[link_section = ".data"]
 static BOOT_LOCK: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
 
+pub(crate) mod mm;
+mod syscall;
+pub(crate) mod trap;
+
 /// 汇编入口 `kernel_main` 的 Rust 侧实现。
 ///
 /// 用 `extern "C"` 是为了让参数落在两个架构的标准整型参数寄存器上
@@ -21,7 +25,7 @@ static BOOT_LOCK: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBoo
 /// - `hartid`：bootstrap hart 的硬件编号。
 /// - `dtb_pa`：DTB 物理地址。LoongArch 的 `-kernel` 入口不通过寄存器传递 DTB，
 ///   该架构下为 0，语义是「未提供」而不是「DTB 在物理地址 0」。
-///   M1 handoff：统一为「先探测固件传参，再回落到固定位置」。
+///   M1 handoff：统一为「先探测固件传参，再回落到固定位置」
 #[no_mangle]
 extern "C" fn kernel_main(hartid: usize, dtb_pa: usize) -> ! {
     // M0 临时桥：Rust 侧原子选主（汇编只做 per-hart 栈与清 BSS，见 arch/*/boot.rs）。
@@ -38,10 +42,11 @@ extern "C" fn kernel_main(hartid: usize, dtb_pa: usize) -> ! {
 /// 内核主函数。M0 结束在停机，不做任何"假装继续跑"的事。
 pub fn main(hartid: usize, dtb_pa: usize) -> ! {
     crate::arch::console::init();
+    crate::arch::trap::init();
 
     crate::log_info!("=============================================");
     crate::log_info!(" kernel-project — 从 0 自研 Linux 兼容宏内核");
-    crate::log_info!(" 里程碑：M0（地基：规范、工具链、双架构 boot）");
+    crate::log_info!(" 里程碑：M1（trap 骨架、MemorySet、内核分页）");
     crate::log_info!("=============================================");
     crate::log_info!(
         "arch={} link_base={:#x} hartid={} dtb_pa={:#x} (0 = 未提供)",
@@ -50,8 +55,9 @@ pub fn main(hartid: usize, dtb_pa: usize) -> ! {
         hartid,
         dtb_pa,
     );
-    crate::log_info!("M0 boot OK");
-    crate::log_info!("下一步（M1）：kalloc::init → mm::init → trap/syscall 骨架");
+    mm::init();
+    crate::log_info!("M1 paging/trap foundation OK");
+    crate::log_info!("下一步（M1）：trap 分发 → syscall 接线 → 用户地址空间");
     crate::log_info!("进入停机：M0 没有中断、没有调度器，没有可运行的东西。");
 
     crate::arch::park()

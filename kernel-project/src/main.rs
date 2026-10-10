@@ -1,5 +1,8 @@
 #![no_std]
 #![no_main]
+#![feature(alloc_error_handler)]
+
+extern crate alloc;
 
 mod klib;
 
@@ -7,6 +10,16 @@ mod arch;
 mod kernel;
 
 use core::panic::PanicInfo;
+
+#[alloc_error_handler]
+fn allocation_error(layout: core::alloc::Layout) -> ! {
+    crate::log_error!(
+        "kernel heap allocation failed: size={} align={}",
+        layout.size(),
+        layout.align()
+    );
+    crate::arch::park()
+}
 
 /// M0 的 panic 处理：打印位置后停机。
 ///

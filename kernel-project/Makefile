@@ -3,8 +3,13 @@
 # 所有构建必须经本文件：直接调用 cargo 会缺少 build.mk 导出的 RUSTFLAGS（链接脚本）
 # 与 feature 集合，产物基址会错（见 AGENTS.md「仓库地图」）。
 #
-#   ARCH=riscv64     make defconfig build
-#   ARCH=loongarch64 make defconfig build
+#   make all                              # 一次生成两个架构的 ELF
+#   ARCH=riscv64     make defconfig build # 只生成 RISC-V64 ELF
+#   ARCH=loongarch64 make defconfig build # 只生成 LoongArch64 ELF
+
+# 配置生成脚本统一通过 Python 3 运行。放在 include build.mk 之前，保证干净仓库执行
+# `make all` / `make defconfig` 时也有默认值；命令行仍可用 PYTHON=... 覆盖。
+PYTHON ?= python3
 
 # ARCH 的真相源是 config/.config（Kconfig 的 choice），不是命令行变量。
 # 命令行传入的 ARCH 只作为「期望值」参与一致性校验，避免两份真相源各说各话
@@ -19,14 +24,22 @@ export ARCH
 
 # 这些目标要在 config/config.mk 不存在（干净仓库）或配置已失效时也能跑，
 # 因此不 include build.mk：clean 尤其不能被一份坏配置挡住。
-ifeq ($(filter defconfig menuconfig alldefconfig clean,$(MAKECMDGOALS)),)
+ifeq ($(filter all defconfig menuconfig alldefconfig clean,$(MAKECMDGOALS)),)
 include build.mk
 endif
 
 DEFAULT_PHONY := all defconfig alldefconfig menuconfig check build run gdb test fmt fmt-check clean
 .PHONY: $(DEFAULT_PHONY)
 
-all: build
+all:
+	$(MAKE) clean
+	$(MAKE) ARCH=riscv64 defconfig
+	$(MAKE) ARCH=riscv64 build
+	$(MAKE) ARCH=loongarch64 defconfig
+	$(MAKE) ARCH=loongarch64 build
+	@echo "双架构 ELF 已生成："
+	@echo "  build/riscv64/kernel.elf"
+	@echo "  build/loongarch64/kernel.elf"
 
 ## 配置 ----------------------------------------------------------------------
 

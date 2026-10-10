@@ -16,9 +16,29 @@ compile_error!("必须启用 arch-riscv64 或 arch-loongarch64；请通过 make 
 #[cfg(feature = "arch-riscv64")]
 mod riscv64;
 #[cfg(feature = "arch-riscv64")]
-pub use self::riscv64::{console, park, ARCH_NAME, LINK_BASE};
+pub use self::riscv64::{
+    console, mm, park, power_off, restart, trap, trap::TrapContext, ARCH_NAME, LINK_BASE,
+};
 
 #[cfg(feature = "arch-loongarch64")]
 mod loongarch64;
 #[cfg(feature = "arch-loongarch64")]
-pub use self::loongarch64::{console, park, ARCH_NAME, LINK_BASE};
+pub use self::loongarch64::{
+    console, mm, park, power_off, restart, trap, trap::TrapContext, ARCH_NAME, LINK_BASE,
+};
+
+/// 公共映射权限传给架构 PTE 编码器时使用的窄接口。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PagePermissions {
+    pub read: bool,
+    pub write: bool,
+    pub execute: bool,
+    pub user: bool,
+    pub memory_type: MemoryType,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MemoryType {
+    Normal,
+    Device,
+}

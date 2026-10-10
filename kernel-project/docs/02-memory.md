@@ -8,13 +8,26 @@
 
 ```
 kernel/mm/
-├── page.rs         物理页分配器（buddy 或 buddy-slab，自研优先）
-├── addrspace.rs    每进程地址空间：MapArea 集合 + PageTable
+├── address.rs      强类型物理/虚拟地址、页号与对齐检查
+├── heap_allocator.rs 内核全局堆（空闲链表、释放与相邻块合并）
+├── kernel_space.rs 内核映像布局与内核页表所有权
+├── kernel_stack.rs 任务内核栈的页帧所有权
+├── frame_allocator.rs 物理页帧分配器与唯一所有权令牌
+├── page_table.rs   公共三级页表遍历
+├── memory_set.rs   MemorySet 与 MapArea 集合
 ├── maparea/        映射区类型：匿名 / 文件私有 / 文件共享 / ELF 段 / 栈 / 堆 / 共享内存
 ├── pagefault.rs    缺页处理（懒分配、CoW、文件页回读）
 ├── ubuf.rs / uptr.rs   用户指针安全访问（边界校验）
 └── (可选) swap.rs      匿名页换出（feature: swap-memory）
 ```
+
+M1 按依赖顺序落地：地址类型与链接布局 → RAM 发现 → 物理页分配器 → 双架构 PTE
+编码/页表寄存器 → 公共页表遍历 → 内核映射与分页切换。分页切换前不得把物理直址
+启动描述成已建立内核地址空间。
+
+当前实现已完成内核身份映射与分页切换；高半直接映射、ASID 和用户地址空间仍未接入。
+内核堆当前使用 1 MiB 固定 backing，支持 Rust `alloc` 类型；按页扩容与 slab/per-CPU
+缓存属于后续性能阶段。
 
 ## 3. 核心抽象
 
