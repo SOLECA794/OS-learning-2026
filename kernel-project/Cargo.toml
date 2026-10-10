@@ -1,0 +1,36 @@
+[package]
+name = "kernel"
+version = "0.1.0"
+edition = "2021"
+description = "从 0 自研的 Linux 兼容多核宏内核（RISC-V64 / LoongArch64）"
+license = "MIT OR Apache-2.0"
+publish = false
+
+# 依赖策略（docs/00 §5 最小依赖 / docs/01 §7 白名单）：
+# M0 阶段不引入任何第三方 crate，只依赖 core —— 保证离线可复现构建。
+# 后续每新增一个依赖都必须先在 docs/01 §7 登记并通过评审。
+[dependencies]
+
+# feature 命名与 Kconfig 符号一一对应（kebab-case，docs/09 §2）。
+# 这些 feature 由 build.mk 从 config/config.mk 映射而来，不要手工开启。
+[features]
+default = []
+
+# 架构选择：由 Kconfig 的 `choice 目标架构` 驱动。
+# 刻意不用 cfg(target_arch)：feature 才是构建链的单一真相源，避免两处判断架构。
+arch-riscv64 = []
+arch-loongarch64 = []
+
+# 日志级别：由 Kconfig 的 `choice 日志级别` 驱动，klib::log 在编译期裁剪。
+log-level-error = []
+log-level-warn = []
+log-level-info = []
+log-level-debug = []
+log-level-trace = []
+
+[profile.dev]
+panic = "abort"
+
+[profile.release]
+panic = "abort"
+debug = true

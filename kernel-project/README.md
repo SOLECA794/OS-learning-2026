@@ -30,18 +30,52 @@
 - 测试与验证：docs/10-testing-and-validation.md
 - 开发治理（AGENTS.md / skills / 模板）：`../sdd-governance/`
 
-## 快速开始（占位，待 M0 落地后填充真实命令）
+## 快速开始
+
+前置：Rust 工具链由 `rust-toolchain.toml` 锚定（含 `riscv64gc-unknown-none-elf` 与
+`loongarch64-unknown-none` 两个 target），`rustup` 会自动准备；运行需要 QEMU（>= 8.0）。
 
 ```bash
-make menuconfig      # 配置架构与 feature
-make build           # 构建
-make run             # QEMU 运行
-make test            # 测试套件
+# 1) 选架构生成配置（架构是 Kconfig 的 choice，切换要连 defconfig 一起重来）
+python tools/kconfig.py --defconfig config/defconfig-riscv64     # 或 defconfig-loongarch64
+
+# 2) 编译检查 / 构建
+make check
+make build            # 产物 build/<ARCH>/kernel.elf，并校验 ELF 入口地址
+
+# 3) 换架构（完整动作，不能只切 ARCH）
+make ARCH=loongarch64 defconfig clean build
+
+# 4) QEMU 运行
+make run
+
+# 5) 调整日志级别等选项
+python tools/kconfig.py --set LOG_LEVEL_TRACE=y
+```
+
+其它目标：`make gdb`（等 GDB 连接）、`make fmt` / `make fmt-check`、`make clean`。
+`make test` 在 M0 尚未接入测例（docs/10：用户态测例随 M1 的 init 进程落地）。
+
+## 仓库结构（M0）
+
+```
+kernel-project/
+├── AGENTS.md          # AI 协作治理（源自 ../sdd-governance/AGENTS.md，仓库地图为本仓库实际内容）
+├── Makefile / build.mk    # 构建入口与 Kconfig→Cargo feature 转译
+├── config/            # Kconfig、defconfig-riscv64 / defconfig-loongarch64
+├── linker/            # riscv64.ld（0x80200000）、loongarch64.ld（0x00200000）
+├── tools/             # kconfig.py（自研解析器）、check-image.py（映像门禁）
+├── src/arch/          # 唯一架构差异入口：riscv64 / loongarch64
+├── src/kernel/        # 核心子系统（M0 只有 kernel::main）
+├── src/klib/          # 日志宏等最底层通用库
+└── log/               # boundary / change-record 等证据（见 ../sdd-governance/）
 ```
 
 ## 状态
 
 - 阶段：M0（地基：规范、工具链、双架构 boot）
+- 已落地：SDD 治理落地、Kconfig→build.mk→Cargo feature 构建链、双架构 boot 汇编（已反汇编核对）、可复现构建（SHA-256 校验通过）
+- 未完成：QEMU 上的实际启动与串口输出验证（`make run`，本机无 QEMU），M0 验收尚未关闭
 - 里程碑：见 docs/08-development-process.md（不含时间排期）
 
 ## 许可

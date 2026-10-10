@@ -1,0 +1,85 @@
+# kernel-project 顶层构建入口
+#
+# 所有构建必须经本文件：直接调用 cargo 会缺少 build.mk 导出的 RUSTFLAGS（链接脚本）
+# 与 feature 集合，产物基址会错（见 AGENTS.md「仓库地图」）。
+#
+#   ARCH=riscv64     make defconfig build
+#   ARCH=loongarch64 make defconfig build
+
+# ARCH 的真相源是 config/.config（Kconfig 的 choice），不是命令行变量。
+# 命令行传入的 ARCH 只作为「期望值」参与一致性校验，避免两份真相源各说各话
+# （docs/07 §2：禁止仅切换 ARCH 而保留另一架构的已解析配置）。
+ifneq ($(origin ARCH),undefined)
+ARCH_REQUESTED := $(ARCH)
+else
+ARCH_REQUESTED :=
+endif
+ARCH ?= riscv64
+export ARCH
+
+# 这些目标要在 config/config.mk 不存在（干净仓库）或配置已失效时也能跑，
+# 因此不 include build.mk：clean 尤其不能被一份坏配置挡住。
+ifeq ($(filter defconfig menuconfig alldefconfig clean,$(MAKECMDGOALS)),)
+include build.mk
+endif
+
+DEFAULT_PHONY := all defconfig alldefconfig menuconfig check build run gdb test fmt fmt-check clean
+.PHONY: $(DEFAULT_PHONY)
+
+all: build
+
+## 配置 ----------------------------------------------------------------------
+
+defconfig:
+	$(PYTHON) tools/kconfig.py --defconfig config/defconfig-$(ARCH)
+
+alldefconfig:
+	$(PYTHON) tools/kconfig.py --alldefconfig
+
+menuconfig:
+	$(PYTHON) tools/kconfig.py --menuconfig
+
+## 编译 ----------------------------------------------------------------------
+
+check:
+	$(CARGO) check --target $(RUST_TARGET) --features $(RUST_FEATURES) $(CARGO_PROFILE_FLAG)
+
+build:
+	@mkdir -p $(BUILD_DIR)
+	$(CARGO) build --target $(RUST_TARGET) --features $(RUST_FEATURES) $(CARGO_PROFILE_FLAG)
+	@cp $(CARGO_OUT_DIR)/$(KERNEL_NAME) $(KERNEL_ELF)
+	@$(PYTHON) tools/check-image.py $(KERNEL_ELF) $(LINK_BASE) $(ARCH)
+	@echo "产物：$(KERNEL_ELF)（链接基址 $(LINK_BASE)，入口 _start）"
+
+## 运行（注意：会真正启动 QEMU，仅在用户明确要求时使用）------------------------
+
+run: build
+	@command -v $(QEMU_BIN) >/dev/null 2>&1 || \
+		{ echo "未找到 $(QEMU_BIN)。请安装 QEMU（>=8.0）并加入 PATH 后再运行 make run。"; exit 1; }
+	$(QEMU_BIN) $(QEMU_FLAGS)
+
+gdb: build
+	@command -v $(QEMU_BIN) >/dev/null 2>&1 || \
+		{ echo "未找到 $(QEMU_BIN)。请安装 QEMU（>=8.0）并加入 PATH 后再运行 make gdb。"; exit 1; }
+	$(QEMU_BIN) $(QEMU_FLAGS) -S -s
+
+## 测试 ----------------------------------------------------------------------
+# M0 占位：测试入口在 M1（mm/task/syscall 骨架落地）接入用户态测例后才有真实内容，
+# 见 docs/10 §1。此处不伪造"测试通过"。
+test:
+	@echo "make test：M0 阶段尚无测例（docs/10：用户态测例随 M1 的 init 进程接入）。"
+	@echo "当前的构建验证请用：make check / make build（ARCH 双架构各跑一次）。"
+	@exit 1
+
+## 格式与清理 ----------------------------------------------------------------
+
+fmt:
+	$(CARGO) fmt
+
+fmt-check:
+	$(CARGO) fmt --check
+
+clean:
+	@rm -rf build target
+	@rm -f config/.config config/config.mk
+	@echo "已清理 build/ target/ 与生成配置"

@@ -1,0 +1,73 @@
+# kernel-project CI（docs/07 §5）
+#
+# CI 纪律：CI 只做快速门槛，不跑数小时长测试；不把 host 绝对路径或私有镜像写进脚本。
+# 合并门槛：本文件全绿（双架构编译 + 日志级别 feature 矩阵 + 格式）。
+#
+# 尚未纳入的作业（按 docs/07 §5 列出，避免被误认为遗漏）：
+#   test-rv64 / test-la64 —— 需要 QEMU 内的 init 进程与用户态测例，M1 接入；
+#   build-la64 实板与长跑基准 —— M3/M4 阶段的事。
+
+name: kernel-ci
+
+on:
+  push:
+  pull_request:
+
+defaults:
+  run:
+    working-directory: kernel-project
+
+jobs:
+  fmt:
+    name: fmt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # 尊重 kernel-project/rust-toolchain.toml 里锚定的版本，不用 @stable 覆盖它
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          components: rustfmt
+      - run: cargo fmt --check
+
+  build:
+    name: build-${{ matrix.arch }}-${{ matrix.log_level }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [riscv64, loongarch64]
+        # 日志级别 feature 的两侧编译（docs/07 §5 feature-matrix）
+        log_level: [ERROR, TRACE]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+      - name: 生成配置
+        run: python tools/kconfig.py --defconfig config/defconfig-${{ matrix.arch }} --set LOG_LEVEL_${{ matrix.log_level }}=y
+      - name: 编译检查
+        run: make check
+      - name: 构建 + 映像门禁
+        run: make build
+
+  repro-check:
+    name: 干净环境重建一致性（SHA-256）
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+      - name: 首次构建并记录身份
+        run: |
+          python tools/kconfig.py --defconfig config/defconfig-riscv64
+          make build
+          sha256sum build/riscv64/kernel.elf | tee kernel.sha256
+      - name: 完全清理后重建并校验
+        run: |
+          make clean
+          python tools/kconfig.py --defconfig config/defconfig-riscv64
+          make build
+          sha256sum -c kernel.sha256

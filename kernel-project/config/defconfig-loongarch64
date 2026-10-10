@@ -1,0 +1,6 @@
+# LoongArch64 默认配置（生成新配置时用：python tools/kconfig.py --defconfig config/defconfig-loongarch64）
+CONFIG_ARCH_LOONGARCH64=y
+CONFIG_LOG_LEVEL_INFO=y
+CONFIG_QEMU_SMP=4
+CONFIG_QEMU_MEMORY_MB=256
+CONFIG_KERNEL_CMDLINE=""

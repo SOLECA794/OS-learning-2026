@@ -36,6 +36,10 @@ config/Kconfig（选项声明，bool/string/int/choice，含 help）
 
 - Cargo.lock 入库；依赖固定版本。
 - vendor/ 由工具生成并校验（cargo vendor + checksum），CI 使用离线源构建。
+- 工具链版本由 `rust-toolchain.toml` 锚定（含两个 target），不跟随 `stable` 漂移。
+- 每次 `make build` 结束会跑 `tools/check-image.py`，机械校验产物的 ELF `e_machine` 与
+  `e_entry` 符合本架构的装载约定（链接基址错了的映像在 QEMU 里表现为"无输出"，
+  与串口驱动写错难以区分，必须门禁化，不靠人眼看反汇编）。
 - 根目录提供 Dockerfile（或容器化构建说明），保证任何人/任何机器产物一致。
 - 证据日志规范：性能/测试记录带 SHA-256 与运行身份（见 sdd-governance/skills/evidence/SKILL.md）。
 

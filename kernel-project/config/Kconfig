@@ -1,0 +1,68 @@
+# 内核与构建配置（docs/07 §2）
+#
+# 贯通规则（新增选项必须走完整条链）：
+#   Kconfig 符号 → config/config.mk → build.mk → Cargo feature / 脚本变量 → CI 矩阵两侧编译
+#
+# 类型分工（docs/07 §2：QEMU 启动值属运行时配置，走脚本而非 feature）：
+#   bool / choice  → 编译期语义 → Cargo feature
+#   int / string   → 运行时值   → Makefile 变量，喂给 QEMU 命令行
+
+mainmenu "kernel-project 内核配置"
+
+choice
+    prompt "目标架构"
+    default ARCH_RISCV64
+
+config ARCH_RISCV64
+    bool "RISC-V 64 (riscv64gc-unknown-none-elf)"
+    help
+      主线架构。QEMU virt + OpenSBI，内核链接到 0x80200000。
+
+config ARCH_LOONGARCH64
+    bool "LoongArch 64 (loongarch64-unknown-none)"
+    help
+      同源架构。QEMU virt，内核链接到 0x00200000（低 256MB RAM 段内）。
+endchoice
+
+choice
+    prompt "日志级别"
+    default LOG_LEVEL_INFO
+
+config LOG_LEVEL_ERROR
+    bool "error"
+
+config LOG_LEVEL_WARN
+    bool "warn"
+
+config LOG_LEVEL_INFO
+    bool "info"
+
+config LOG_LEVEL_DEBUG
+    bool "debug"
+
+config LOG_LEVEL_TRACE
+    bool "trace"
+endchoice
+
+menu "运行时配置（不产生 Cargo feature）"
+
+config QEMU_SMP
+    int "QEMU 启动核数"
+    default 4
+    help
+      只用于 make run / make gdb 的 -smp 参数，不参与编译。
+
+config QEMU_MEMORY_MB
+    int "QEMU 内存大小 (MB)"
+    default 256
+    help
+      LoongArch 侧注意：内核链接在低 256MB 段（0x00200000），
+      该值不得小于内核映像与 BSS 的上界。
+
+config KERNEL_CMDLINE
+    string "内核命令行"
+    default ""
+    help
+      通过 QEMU -append 传给内核。M0 内核不解析，仅为 M1 预留通道。
+
+endmenu
