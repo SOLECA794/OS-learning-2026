@@ -13,15 +13,25 @@ global_asm!(
     .globl _start
 
 _start:
-    # 临时桥（M0）：只有 bootstrap hart 进入 Rust，其余 hart 直接停机。
-    # 保留原因：M0 没有 per-hart 栈、没有 IPI、没有调度器，无法安全启动 secondary hart。
-    # 行为边界：secondary hart 在 wfi 上等待，不触碰 BSS、不触碰串口。
-    # 移除条件：M1 落地 arch::setup_all_cores 后，此分支改为跳转到 secondary 启动路径。
-    bnez a0, .Lpark
+    # M0 临时桥：每个核取自己的 boot 栈，全部进入 Rust，
+    # 由 kernel_main 里的原子锁选主（见 kernel/mod.rs）。
+    # 为什么不在汇编里选主：LLVM 对 global_asm 内联汇编的 Zaamo 指令检查
+    # 与 Rust 生成代码不一致（实测 amoswap 汇编被拒、AtomicBool 可编译）。
+    # 行为边界：hartid >= BOOT_HART_COUNT 的核不支持，直接停机。
+    # 移除条件：M1 arch::setup_all_cores 落地后并入该路径。
+    li t1, 8                    # BOOT_HART_COUNT（与 linker/riscv64.ld 一致）
+    bgeu a0, t1, .Lpark
+    la t2, __boot_stack_bottom
+    # 每核栈顶 = bottom + (hartid+1)*8192。用移位代替乘法（8K = 2^13）：
+    # LLVM 对 global_asm 只启用基础指令集，mul（Zmmul）/amo（Zaamo）都会被拒，
+    # 即使 target 实际支持（与 Rust 生成代码的检查不一致）。
+    slli t4, a0, 13             # t4 = hartid * 8192
+    add t5, t2, t4
+    li t3, 8192                 # BOOT_STACK_SIZE（每核 8K）
+    add sp, t5, t3              # sp = bottom + (hartid+1)*size = 该核栈顶
 
-    la sp, __boot_stack_top
-
-    # 清 BSS。sp 已指向 boot 栈顶且栈向下生长，清零不会覆盖正在使用的栈空间。
+    # 清 BSS。幂等：多个核先后执行只写 0，无副作用；
+    # 每核的 sp 已独立，清零不会覆盖任何正在使用的栈。
     la t0, __bss_start
     la t1, __bss_end
 .Lclear_bss:

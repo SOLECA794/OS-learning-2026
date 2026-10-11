@@ -7,6 +7,11 @@
 //!   kalloc::init → mm::init → driver::init/arch::init/fs::init → fs::mount_init_fs
 //!   → task::create_initprocess → timer::init → arch::setup_all_cores → 调度器
 
+/// 选主锁：放 `.data`（初值 0 随镜像加载，不在 BSS 清零范围内），
+/// 保证无论哪个核先执行 `swap` 都只有一个成为 bootstrap。
+#[link_section = ".data"]
+static BOOT_LOCK: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
 /// 汇编入口 `kernel_main` 的 Rust 侧实现。
 ///
 /// 用 `extern "C"` 是为了让参数落在两个架构的标准整型参数寄存器上
@@ -19,6 +24,14 @@
 ///   M1 handoff：统一为「先探测固件传参，再回落到固定位置」。
 #[no_mangle]
 extern "C" fn kernel_main(hartid: usize, dtb_pa: usize) -> ! {
+    // M0 临时桥：Rust 侧原子选主（汇编只做 per-hart 栈与清 BSS，见 arch/*/boot.rs）。
+    // 为什么在 Rust 侧：LLVM 对 global_asm 内联汇编的 Zaamo 指令检查与 Rust
+    // 生成代码不一致（实测 amoswap 汇编被拒、AtomicBool 可编译）。
+    // 行为边界：非 bootstrap 核直接停机，不触碰控制台与 BSS。
+    // 移除条件：M1 arch::setup_all_cores 落地后，选主并入该路径。
+    if BOOT_LOCK.swap(true, core::sync::atomic::Ordering::AcqRel) {
+        crate::arch::park()
+    }
     main(hartid, dtb_pa)
 }
 

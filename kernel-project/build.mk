@@ -81,6 +81,13 @@ RUST_FEATURES := $(RUST_FEATURES),log-level-$(LOG_LEVEL)
 # ---------------------------------------------------------------------------
 QEMU_SMP       := $(CONFIG_QEMU_SMP)
 QEMU_MEMORY_MB := $(CONFIG_QEMU_MEMORY_MB)
+# LoongArch QEMU virt 机器强制要求 ram_size > 1G（实测 < 1G 直接报错退出）。
+# 在 build 阶段就拒绝，而不是等到 make run 才暴露。
+ifeq ($(ARCH),loongarch64)
+ifeq ($(shell test $(QEMU_MEMORY_MB) -ge 1024 && echo ok),)
+$(error LoongArch QEMU virt 要求内存 >= 1G：CONFIG_QEMU_MEMORY_MB=$(QEMU_MEMORY_MB) < 1024，请调大后重新 defconfig)
+endif
+endif
 KERNEL_CMDLINE := $(CONFIG_KERNEL_CMDLINE)
 
 # ---------------------------------------------------------------------------

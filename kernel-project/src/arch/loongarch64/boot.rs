@@ -19,14 +19,21 @@ _start:
     csrrd $r12, 0x20
     andi  $r12, $r12, 0x1ff
 
-    # 临时桥（M0）：与 riscv64/boot.rs 对称，只有 core 0 进入 Rust。
-    # 保留原因：M0 没有 per-hart 栈与 IPI，无法安全启动 secondary core。
-    # 移除条件：M1 落地 arch::setup_all_cores 后改为 secondary 启动路径。
-    bnez  $r12, .Lpark
+    # M0 临时桥：per-hart 栈 + Rust 侧原子选主（与 riscv64/boot.rs 对称）。
+    # 为什么：QEMU -kernel 模式当前只引导主核，但评测机 / 实板可能引导全部核；
+    # 每个核取自己的栈全部进入 Rust，由 kernel_main 原子锁选主。
+    # 移除条件：M1 arch::setup_all_cores 落地后并入该路径。
+    li.d  $r13, 8               # BOOT_HART_COUNT（与 linker/loongarch64.ld 一致）
+    bgeu  $r12, $r13, .Lpark
+    la    $r14, __boot_stack_bottom
+    # 每核栈顶 = bottom + (core+1)*8192。用移位代替乘法（8K = 2^13）：
+    # LLVM 对 global_asm 只启用基础指令集（与 Rust 生成代码的检查不一致）。
+    slli.d $r17, $r12, 13       # r17 = core * 8192
+    add.d $r18, $r14, $r17
+    li.d  $r15, 8192            # BOOT_STACK_SIZE（每核 8K）
+    add.d $r3, $r18, $r15       # sp = bottom + (core+1)*size = 该核栈顶
 
-    la    $r13, __boot_stack_top
-    addi.d $r3, $r13, 0          # sp = $r3
-
+    # 清 BSS（幂等，见 riscv64/boot.rs 说明）。
     la    $r14, __bss_start
     la    $r15, __bss_end
 .Lclear_bss:
@@ -35,7 +42,7 @@ _start:
     addi.d $r14, $r14, 8
     b     .Lclear_bss
 .Lbss_done:
-    addi.d $r4, $r12, 0          # a0 = hartid
+    addi.d $r4, $r12, 0          # a0 = hartid（core id）
     addi.d $r5, $r0, 0           # a1 = dtb_pa；LA 入口未提供，语义为「未提供」
     bl    kernel_main
 

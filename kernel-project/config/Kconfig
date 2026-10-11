@@ -54,10 +54,11 @@ config QEMU_SMP
 
 config QEMU_MEMORY_MB
     int "QEMU 内存大小 (MB)"
-    default 256
+    default 1024
     help
-      LoongArch 侧注意：内核链接在低 256MB 段（0x00200000），
-      该值不得小于内核映像与 BSS 的上界。
+      默认 1024：LoongArch QEMU virt 机器强制要求 ram_size > 1G
+      （实测 -m 256M 直接报错退出）。RISC-V 侧无此限制，1G 对 M0 无害。
+      另注意内核链接在低 256MB 段（0x00200000），该值不得小于内核映像与 BSS 的上界。
 
 config KERNEL_CMDLINE
     string "内核命令行"

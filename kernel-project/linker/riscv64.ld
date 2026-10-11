@@ -11,7 +11,8 @@ OUTPUT_ARCH(riscv)
 ENTRY(_start)
 
 BASE_ADDRESS = 0x80200000;
-BOOT_STACK_SIZE = 64K;
+BOOT_STACK_SIZE = 8K;
+BOOT_HART_COUNT = 8;
 
 SECTIONS
 {
@@ -40,13 +41,15 @@ SECTIONS
         __bss_end = .;
     }
 
-    /* M0：只有 bootstrap hart 进入 Rust，因此这里只预留一个 boot 栈。
-     * 退出条件：M1 引入 arch::setup_all_cores 后改为 per-hart 栈数组，
+    /* M0：per-hart boot 栈数组（每核 8K，共 8 核 = 64K）。
+     * 每个核在汇编里按 hartid 取自己的栈，全部进入 Rust 后由
+     * kernel_main 的原子锁选主（见 kernel/mod.rs）。
+     * 退出条件：M1 引入 arch::setup_all_cores 后改为正式的 per-hart 栈管理，
      *           并删除本注释中的 M0 限定说明。
      */
     .boot_stack (NOLOAD) : ALIGN(64K) {
         __boot_stack_bottom = .;
-        . = . + BOOT_STACK_SIZE;
+        . = . + BOOT_STACK_SIZE * BOOT_HART_COUNT;
         __boot_stack_top = .;
     }
 

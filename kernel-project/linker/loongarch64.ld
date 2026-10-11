@@ -10,7 +10,8 @@
 ENTRY(_start)
 
 BASE_ADDRESS = 0x00200000;
-BOOT_STACK_SIZE = 64K;
+BOOT_STACK_SIZE = 8K;
+BOOT_HART_COUNT = 8;
 
 SECTIONS
 {
@@ -39,10 +40,10 @@ SECTIONS
         __bss_end = .;
     }
 
-    /* 同 riscv64.ld：M0 只预留 bootstrap hart 的 boot 栈。 */
+    /* 同 riscv64.ld：per-hart boot 栈数组（每核 8K，共 8 核 = 64K）。 */
     .boot_stack (NOLOAD) : ALIGN(64K) {
         __boot_stack_bottom = .;
-        . = . + BOOT_STACK_SIZE;
+        . = . + BOOT_STACK_SIZE * BOOT_HART_COUNT;
         __boot_stack_top = .;
     }
 
