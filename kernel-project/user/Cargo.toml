@@ -1,0 +1,8 @@
+[package]
+name = "uapp"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[profile.release]
+panic = "abort"

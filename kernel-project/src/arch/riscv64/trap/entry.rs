@@ -1,7 +1,11 @@
-//! RISC-V64 trap 汇编保存/恢复路径。
+//! RISC-V64 trap 汇编保存/恢复路径（M1.5：支持用户态/内核态来源切换）。
 //!
-//! 当前入口只使用正在运行的内核栈。用户态落地后必须通过 `sscratch` 切换到
-//! 当前 Task 的内核栈，不能继续借用 boot 栈。
+//! sscratch 协议：用户态运行时 `sscratch = 当前任务内核栈顶`；内核态运行时
+//! `sscratch = 0`。进入时 `csrrw sp, sscratch, sp` 交换：交换后 `sp != 0` 说明
+//! 来自用户态（已切到内核栈顶），`sp == 0` 说明来自内核态（换回）。
+//! 恢复段 `__riscv64_trap_restore` 同时服务 trap 返回与「从构造好的 TrapContext
+//! 进入用户态」（初始化流程复用）。内核处理期间置 sstatus.SUM=1 以访问用户页，
+//! 恢复时写回保存的 sstatus 自动清除。
 
 use core::arch::global_asm;
 
@@ -12,6 +16,10 @@ global_asm!(r#"
     .balign 4
     .globl __riscv64_trap_entry
 __riscv64_trap_entry:
+    csrrw sp, sscratch, sp
+    bnez sp, 1f
+    csrrw sp, sscratch, sp
+1:
     addi sp, sp, -{frame_size}
     sd zero, 0(sp)
     sd ra, 8(sp)
@@ -54,8 +62,33 @@ __riscv64_trap_entry:
     sd t0, 272(sp)
     csrr t0, stval
     sd t0, 280(sp)
+    # 来源判定：sstatus.SPP（1=内核态，0=用户态）。
+    # 用户态：x2 槽 = 用户 sp（进入时暂存于 sscratch），并把 sscratch 清零。
+    ld t0, 256(sp)
+    srli t0, t0, 8
+    andi t0, t0, 1
+    bnez t0, 2f
+    csrr t1, sscratch
+    sd t1, 16(sp)
+    csrw sscratch, zero
+2:
+    # 内核处理期间允许 S-mode 访问用户页（SUM=1）。
+    li t0, 1 << 18
+    csrs sstatus, t0
     mv a0, sp
     call kernel_trap_handler
+
+    .globl __riscv64_trap_restore
+__riscv64_trap_restore:
+    # 来源判定复用现场保存的 sstatus.SPP：
+    # 用户态返回 → sscratch 重置为内核栈顶（= 现场顶）；内核态返回 → 保持 0。
+    ld t0, 256(sp)
+    srli t0, t0, 8
+    andi t0, t0, 1
+    bnez t0, 3f
+    addi t0, sp, {frame_size}
+    csrw sscratch, t0
+3:
     ld t0, 256(sp)
     csrw sstatus, t0
     ld t0, 264(sp)

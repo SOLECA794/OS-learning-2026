@@ -16,6 +16,7 @@
 #[link_section = ".data"]
 static BOOT_LOCK: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
 
+pub(crate) mod elf;
 pub(crate) mod mm;
 mod syscall;
 pub(crate) mod trap;
@@ -92,8 +93,59 @@ pub fn main(hartid: usize, dtb_pa: usize) -> ! {
     );
     mm::init();
     crate::log_info!("M1 paging/trap foundation OK");
-    crate::log_info!("下一步（M1）：trap 分发 → syscall 接线 → 用户地址空间");
-    crate::log_info!("进入停机：M0 没有中断、没有调度器，没有可运行的东西。");
+    crate::log_info!("M1.5: entering user mode");
+    init_user()
+}
 
-    crate::arch::park()
+/// 加载内嵌 uapp，构造用户地址空间与内核栈，进入用户态（M1.5 单任务闭环）。
+///
+/// 流程：ELF 解析 → 用户 MemorySet（内核映射+用户段+用户栈）→ 拷段内容 →
+/// 激活用户页表 → 内核栈顶放置 TrapContext → sscratch=栈顶 → restore 进 U 模式。
+fn init_user() -> ! {
+    let uapp: &[u8] = include_bytes!("../../build/user/uapp.elf");
+    let elf = crate::kernel::elf::parse(uapp).expect("uapp ELF parse failed");
+
+    let layout = mm::kernel_space::KernelImageLayout::current();
+    let memory_bytes = mm::configured_memory_bytes();
+    let (_, memory_end) = crate::arch::mm::physical_memory_range(memory_bytes)
+        .expect("configured memory range unavailable");
+
+    // 用户栈顶固定低于内核身份映射区（RV: 内核 0x8000_0000 起）。
+    const USER_STACK_TOP: usize = 0x7f00_0000;
+    let user_stack = mm::address::AddressRange::new(
+        mm::address::VirtAddr::new(USER_STACK_TOP - 0x1000),
+        mm::address::VirtAddr::new(USER_STACK_TOP),
+    )
+    .expect("user stack range");
+
+    let mut space = mm::memory_set::MemorySet::new_user(
+        layout,
+        mm::address::VirtAddr::new(memory_end),
+        &elf.segments,
+        user_stack,
+    )
+    .expect("user MemorySet construction failed");
+    space
+        .load_elf(&elf.segments, uapp)
+        .expect("uapp segment load failed");
+
+    let kstack = mm::kernel_stack::KernelStack::new().expect("user task kernel stack");
+    let kstack_top = kstack.top();
+
+    // SAFETY: 用户页表含内核身份映射 + 用户段，切表后当前执行地址与栈仍可访问。
+    unsafe { crate::arch::mm::activate(space.root_ppn().value()) };
+
+    let context = crate::arch::trap::TrapContext::new_user(elf.entry, USER_STACK_TOP);
+    let context_ptr = (kstack_top - core::mem::size_of::<crate::arch::trap::TrapContext>())
+        as *mut crate::arch::trap::TrapContext;
+    // SAFETY: context_ptr 位于新分配内核栈顶下方，无重叠使用。
+    unsafe { context_ptr.write(context) };
+    crate::arch::trap::set_user_scratch(kstack_top);
+    crate::log_info!(
+        "M1.5: running user program entry={:#x} user_sp={:#x} kernel_stack_top={:#x}",
+        elf.entry,
+        USER_STACK_TOP,
+        kstack_top,
+    );
+    crate::arch::trap::restore_from(context_ptr)
 }

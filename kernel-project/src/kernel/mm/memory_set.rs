@@ -1,5 +1,7 @@
 //! 映射区与地址空间所有权。
 
+use alloc::vec::Vec;
+
 use super::address::{AddressError, AddressRange, PhysPageNum, VirtAddr, VirtPageNum, VpnRange};
 use super::frame_allocator::{self, FrameAllocError};
 use super::kernel_space::KernelImageLayout;
@@ -189,45 +191,132 @@ impl MemorySet {
         physical_memory_end: VirtAddr,
     ) -> Result<Self, MemoryError> {
         let mut memory_set = Self::new_bare()?;
+        memory_set.insert_kernel_mapping(layout, physical_memory_end)?;
+        Ok(memory_set)
+    }
+
+    /// 构造用户地址空间：内核映射 + 用户 LOAD 段（Framed+USER）+ 用户栈（Framed+USER）。
+    /// 段内容需另行调用 `load_elf` 拷入；0 页不映射（NULL 解引用 → 缺页受控）。
+    pub fn new_user(
+        layout: KernelImageLayout,
+        physical_memory_end: VirtAddr,
+        segments: &[crate::kernel::elf::LoadSegment],
+        user_stack: AddressRange<VirtAddr>,
+    ) -> Result<Self, MemoryError> {
+        let mut memory_set = Self::new_bare()?;
+        memory_set.insert_kernel_mapping(layout, physical_memory_end)?;
+        // 映射区间按页合并后再建区：rustc 小程序的 .text/.rodata 常共享同一页
+        // （uapp 实测：LOAD1 end=0x1004c、LOAD2 start=0x1004c），逐段 insert 会 Overlap。
+        // 权限取并集（宽松；M2 引入逐页 PTE 精确权限后收窄）。内容仍按原始段拷贝。
+        for (start, end, perms) in merged_user_ranges(segments) {
+            let range = AddressRange::new(start.start_address(), end.start_address())?;
+            memory_set.insert(MapArea::new(range, MapType::Framed, perms)?)?;
+        }
         memory_set.insert(MapArea::new(
+            user_stack,
+            MapType::Framed,
+            MapPermission::READ | MapPermission::WRITE | MapPermission::USER,
+        )?)?;
+        Ok(memory_set)
+    }
+
+    /// 把 ELF LOAD 段内容拷入已映射的用户页（filesz 内容 + memsz-filesz 清零）。
+    pub fn load_elf(
+        &mut self,
+        segments: &[crate::kernel::elf::LoadSegment],
+        elf_bytes: &[u8],
+    ) -> Result<(), MemoryError> {
+        for seg in segments {
+            if seg.file_bytes == 0 {
+                continue;
+            }
+            let seg_end = seg.vaddr + seg.mem_bytes;
+            let mut vpn = VirtAddr::new(seg.vaddr).floor();
+            let end_vpn = VirtAddr::new(seg_end).ceil()?;
+            while vpn < end_vpn {
+                let page_va = vpn.value() << super::address::PAGE_SHIFT;
+                let copy_start = core::cmp::max(page_va, seg.vaddr);
+                let copy_end = core::cmp::min(page_va + super::address::PAGE_SIZE, seg_end);
+                if copy_start < copy_end {
+                    let file_src = seg.file_offset + (copy_start - seg.vaddr);
+                    let ppn = self
+                        .translate(VirtAddr::new(page_va))
+                        .ok_or(MemoryError::AreaNotFound)?;
+                    let dst = (ppn.value() << super::address::PAGE_SHIFT) + (copy_start - page_va);
+                    let file_end = seg.file_offset + seg.file_bytes;
+                    // SAFETY: dst 是本 MemorySet 刚建立的用户物理页（identity 映射可写），
+                    // 来源 elf_bytes 是内核映像内的只读数据，区间均已校验。
+                    unsafe {
+                        if file_src < file_end {
+                            let n = core::cmp::min(copy_end - copy_start, file_end - file_src);
+                            core::ptr::copy_nonoverlapping(
+                                elf_bytes.as_ptr().add(file_src),
+                                dst as *mut u8,
+                                n,
+                            );
+                            if n < copy_end - copy_start {
+                                core::ptr::write_bytes(
+                                    (dst + n) as *mut u8,
+                                    0,
+                                    (copy_end - copy_start) - n,
+                                );
+                            }
+                        } else {
+                            core::ptr::write_bytes(dst as *mut u8, 0, copy_end - copy_start);
+                        }
+                    }
+                }
+                vpn = vpn.checked_add(1)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// 内核映像身份映射（代码/rodata/data/bss/boot 栈/空闲 RAM/必需 MMIO）。
+    fn insert_kernel_mapping(
+        &mut self,
+        layout: KernelImageLayout,
+        physical_memory_end: VirtAddr,
+    ) -> Result<(), MemoryError> {
+        self.insert(MapArea::new(
             layout.text,
             MapType::Identity,
             MapPermission::READ | MapPermission::EXECUTE,
         )?)?;
-        memory_set.insert(MapArea::new(
+        self.insert(MapArea::new(
             layout.rodata,
             MapType::Identity,
             MapPermission::READ,
         )?)?;
-        memory_set.insert(MapArea::new(
+        self.insert(MapArea::new(
             layout.data,
             MapType::Identity,
             MapPermission::READ | MapPermission::WRITE,
         )?)?;
-        memory_set.insert(MapArea::new(
+        self.insert(MapArea::new(
             layout.bss,
             MapType::Identity,
             MapPermission::READ | MapPermission::WRITE,
         )?)?;
-        memory_set.insert(MapArea::new(
+        self.insert(MapArea::new(
             layout.boot_stack,
             MapType::Identity,
             MapPermission::READ | MapPermission::WRITE,
         )?)?;
 
         let free_memory = AddressRange::new(layout.end, physical_memory_end)?;
-        memory_set.insert(MapArea::new(
+        self.insert(MapArea::new(
             free_memory,
             MapType::Identity,
             MapPermission::READ | MapPermission::WRITE,
         )?)?;
         for &(start, end) in crate::arch::mm::kernel_device_ranges() {
-            memory_set.insert(MapArea::new_device(AddressRange::new(
+            self.insert(MapArea::new_device(AddressRange::new(
                 VirtAddr::new(start),
                 VirtAddr::new(end),
             )?)?)?;
         }
-        Ok(memory_set)
+        Ok(())
     }
 
     /// 插入区域，拒绝重叠并在成功建图后才发布到区域表。
@@ -279,6 +368,51 @@ impl MemorySet {
     pub fn area_count(&self) -> usize {
         self.areas.iter().flatten().count()
     }
+}
+
+/// 用户 LOAD 段按页合并为不相交的映射区间（排序 + 合并重叠/相邻页，权限并集）。
+fn merged_user_ranges(
+    segments: &[crate::kernel::elf::LoadSegment],
+) -> Vec<(VirtPageNum, VirtPageNum, MapPermission)> {
+    let mut items: Vec<(usize, usize, MapPermission)> = segments
+        .iter()
+        .filter(|seg| seg.mem_bytes > 0)
+        .map(|seg| {
+            let start = VirtAddr::new(seg.vaddr).floor();
+            let end = VirtAddr::new(seg.vaddr + seg.mem_bytes)
+                .ceil()
+                .expect("user segment ceil overflow");
+            (start.value(), end.value(), segment_permissions(seg.flags))
+        })
+        .collect();
+    items.sort_by_key(|item| item.0);
+    let mut merged: Vec<(usize, usize, MapPermission)> = Vec::new();
+    for (start, end, perms) in items {
+        if let Some(last) = merged.last_mut() {
+            if start <= last.1 {
+                last.1 = core::cmp::max(last.1, end);
+                last.2 = last.2.union(perms);
+                continue;
+            }
+        }
+        merged.push((start, end, perms));
+    }
+    merged
+        .into_iter()
+        .map(|(start, end, perms)| (VirtPageNum::new(start), VirtPageNum::new(end), perms))
+        .collect()
+}
+
+/// 从 ELF 段标志推导公共映射权限（用户访问恒开，写权限隐含读，见 page_table 校验）。
+fn segment_permissions(flags: crate::kernel::elf::SegmentFlags) -> MapPermission {
+    let mut p = MapPermission::READ | MapPermission::USER;
+    if flags.write {
+        p = p.union(MapPermission::WRITE);
+    }
+    if flags.execute {
+        p = p.union(MapPermission::EXECUTE);
+    }
+    p
 }
 
 impl Drop for MemorySet {

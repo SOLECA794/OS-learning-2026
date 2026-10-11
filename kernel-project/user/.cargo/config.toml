@@ -1,0 +1,6 @@
+[build]
+target = "riscv64gc-unknown-none-elf"
+
+[target.riscv64gc-unknown-none-elf]
+# 相对 rustc 调用目录（kernel-project）：链接脚本与不依赖任何 start 文件
+rustflags = ["-C", "link-arg=-Tuser/user.ld", "-C", "link-arg=-nostartfiles"]

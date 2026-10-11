@@ -69,7 +69,7 @@ kernel-project/
 ├── linker/            # riscv64.ld（0x80200000）、loongarch64.ld（0x00200000）
 ├── tools/             # kconfig.py（自研解析器）、check-image.py（映像门禁）
 ├── src/arch/          # 唯一架构差异入口：riscv64 / loongarch64
-├── src/kernel/        # 核心子系统：mm、trap、klib（M1 现状；task/sched/syscall/fs 待建）
+├── src/kernel/        # 核心子系统：mm、trap、klib、elf、syscall（M1.5：RV 用户态首闭环；task/sched/fs 待建）
 ├── docs/              # 设计文档 00–10
 └── log/               # boundary / change-record 等证据（见 ../sdd-governance/）
 ```
@@ -82,7 +82,7 @@ kernel-project/
 | Kconfig → build.mk → Cargo feature 构建链 | 已实现，有已知限制 | 见下方已知限制 ③④ |
 | 双架构 boot（RV 0x80200000 / LA 0x200000） | **运行验证通过** | QEMU 9.2.1 双架构 M0/M1 启动日志（log/change/） |
 | 分页激活 + heap（M1） | **运行验证通过** | 双架构 QEMU 至 "M1 paging/trap foundation OK"（log/change/2026-10-11-M0-qemu-boot-fixes.md 等） |
-| RV 用户态 / syscall 闭环 | 尚未运行 | —（M1.5 目标） |
+| RV 用户态 / syscall 闭环（M1.5） | **运行验证通过** | QEMU 输出 "hello from user mode" → "user program exited with code 0"（log/change/2026-10-12-M15-usermode.md）；LA 用户态功能后置（占位 stub，编译通过） |
 | 任务 / 调度 / fork | 尚未运行 | 仅设计文档 docs/03 |
 | VFS / 文件 / shell | 尚未运行 | 仅设计文档 docs/04 |
 | 自动测试入口（make test） | 尚未接入 | 接入前明确失败 |

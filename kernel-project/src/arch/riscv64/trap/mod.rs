@@ -26,3 +26,35 @@ pub fn init() {
         );
     }
 }
+
+/// 设置 sscratch（M1.5 用户态切换协议：用户态运行时 = 当前任务内核栈顶）。
+pub fn set_user_scratch(value: usize) {
+    // SAFETY: 写架构 CSR，无前置条件。
+    unsafe {
+        asm!(
+            "csrw sscratch, {value}",
+            value = in(reg) value,
+            options(nostack, preserves_flags)
+        );
+    }
+}
+
+/// 从构造好的 TrapContext 进入（或返回）用户态。调用后不返回。
+///
+/// `context` 指向一帧完整的 TrapContext（恢复段会按 SPP 决定是否重置 sscratch）。
+pub fn restore_from(context: *const TrapContext) -> ! {
+    unsafe extern "C" {
+        fn __riscv64_trap_restore();
+    }
+    let restore = __riscv64_trap_restore as usize;
+    // SAFETY: context 指向有效现场；jr 不返回，选项声明 noreturn。
+    unsafe {
+        asm!(
+            "mv sp, {ctx}",
+            "jr {restore}",
+            ctx = in(reg) context as usize,
+            restore = in(reg) restore,
+            options(noreturn, nostack)
+        );
+    }
+}

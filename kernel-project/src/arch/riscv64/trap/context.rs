@@ -63,6 +63,23 @@ impl TrapContext {
         ]
     }
 
+    /// 构造用户态入口上下文：SPP=0（U 模式）、SPIE=1，sp=用户栈顶，pc=入口。
+    ///
+    /// 供 `__riscv64_trap_restore` 直接 sret 进入用户态；SUM 位无需设置
+    /// （进入用户态前 sstatus 由本构造值决定，用户模式不访问内核页）。
+    pub fn new_user(entry: usize, user_sp: usize) -> Self {
+        const SSTATUS_SPIE: usize = 1 << 5;
+        let mut ctx = Self {
+            registers: [0; 32],
+            sstatus: SSTATUS_SPIE,
+            sepc: entry,
+            scause: 0,
+            stval: 0,
+        };
+        ctx.registers[2] = user_sp;
+        ctx
+    }
+
     pub fn set_syscall_return(&mut self, value: isize) {
         self.registers[10] = value as usize;
     }

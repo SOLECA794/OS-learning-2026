@@ -38,7 +38,7 @@ $(error 编排错误：配置/清理目标不能与构建目标同条命令。�
 endif
 endif
 
-DEFAULT_PHONY := all defconfig alldefconfig menuconfig check build run gdb test fmt fmt-check clean
+DEFAULT_PHONY := all defconfig alldefconfig menuconfig check build run gdb test fmt fmt-check clean user
 .PHONY: $(DEFAULT_PHONY)
 
 all:
@@ -64,15 +64,31 @@ menuconfig:
 
 ## 编译 ----------------------------------------------------------------------
 
-check:
+check: user
 	$(CARGO) check --target $(RUST_TARGET) --features $(RUST_FEATURES) $(CARGO_PROFILE_FLAG)
 
-build:
+build: user
 	@mkdir -p $(BUILD_DIR)
 	$(CARGO) build --target $(RUST_TARGET) --features $(RUST_FEATURES) $(CARGO_PROFILE_FLAG)
 	@cp $(CARGO_OUT_DIR)/$(KERNEL_NAME) $(KERNEL_ELF)
 	@$(PYTHON) tools/check-image.py $(KERNEL_ELF) $(LINK_BASE) $(ARCH)
 	@echo "产物：$(KERNEL_ELF)（链接基址 $(LINK_BASE)，入口 _start）"
+
+## 用户程序（M1.5：内核 include_bytes! 内嵌 uapp.elf，build/check 依赖本目标）-----
+
+USER_ELF := build/user/uapp.elf
+# user crate 的 .cargo/config.toml 不会被 --manifest-path 模式发现（cargo 从 CWD 找配置），
+# 因此 target 与链接脚本在此显式声明。
+# -T 必须用 $(CURDIR) 绝对路径：rustc 链接时工作目录会切到临时目录，相对路径找不到脚本。
+# 裸机目标无 crt 启动文件，不需要 -nostartfiles（rust-lld 也不接受该 GNU ld 参数）。
+USER_TARGET := riscv64gc-unknown-none-elf
+USER_RUSTFLAGS := -C link-arg=-T$(CURDIR)/user/user.ld
+
+user:
+	@mkdir -p build/user
+	RUSTFLAGS="$(USER_RUSTFLAGS)" $(CARGO) build --release --manifest-path user/Cargo.toml --target $(USER_TARGET)
+	@cp user/target/riscv64gc-unknown-none-elf/release/uapp $(USER_ELF)
+	@echo "用户程序：$(USER_ELF)"
 
 ## 运行（注意：会真正启动 QEMU，仅在用户明确要求时使用）------------------------
 
@@ -102,6 +118,6 @@ fmt-check:
 	$(CARGO) fmt --check
 
 clean:
-	@rm -rf build target
+	@rm -rf build target user/target
 	@rm -f config/.config config/config.mk
 	@echo "已清理 build/ target/ 与生成配置"
