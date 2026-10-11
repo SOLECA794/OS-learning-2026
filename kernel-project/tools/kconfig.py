@@ -245,7 +245,7 @@ class Menu:
     def _eval_value(self, tokens: list[str], values: dict[str, str]) -> str:
         if len(tokens) == 1:
             tok = tokens[0]
-            if tok in self.symbols:
+            if tok in self.menu.symbols:  # _Evaluator 无 symbols 属性，真相源在 Menu（P1④ 修复）
                 return self.symbol_value(tok, values)
             return tok.strip('"')
         return " ".join(t.strip('"') for t in tokens)
@@ -312,7 +312,7 @@ class _Evaluator:
             if self._peek() == ")":
                 self._next()
             return val
-        if tok in self.symbols:
+        if tok in self.menu.symbols:  # _Evaluator 无 symbols 属性，真相源在 Menu（P1④ 修复）
             v = self.menu.symbol_value(tok, self.values)
             return v not in (FALSE, "n", "")
         return tok.strip('"') not in (FALSE, "n", "")
