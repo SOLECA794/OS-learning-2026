@@ -1,9 +1,6 @@
 # 工具链锚定（docs/07 §4 可复现性）。
-#
-# 版本号写死而非写 "stable"：构建产物必须可复现，"跟着 stable 走"会让
-# 三个月后重新构建的产物与 CI 当时的产物不是一回事。
-# 升级工具链是一次显式提交，不是环境漂移。
 [toolchain]
-channel = "1.94.0"
-components = ["rustfmt"]
+channel = "nightly-2025-05-20"
+components = ["rust-src", "rustfmt", "clippy"]
 targets = ["riscv64gc-unknown-none-elf", "loongarch64-unknown-none"]
+profile = "minimal"

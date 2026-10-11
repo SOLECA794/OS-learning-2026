@@ -2,8 +2,14 @@
 
 pub mod boot;
 pub mod console;
+pub mod mm;
+mod platform;
+mod power;
+pub mod trap;
 
-/// 架构名，仅用于日志与诊断（不参与行为决策）。
+pub use power::{power_off, restart};
+
+/// 架构名，仅用于日志与诊断（不参与行为决策）
 pub const ARCH_NAME: &str = "loongarch64";
 
 /// 内核链接基址，与 linker/loongarch64.ld 的 BASE_ADDRESS 一致。
