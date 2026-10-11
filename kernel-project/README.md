@@ -14,7 +14,7 @@
 |---|---|---|
 | 内核形态 | Linux 兼容宏内核 | docs/01-architecture.md |
 | 语言 | Rust（no_std） | docs/01-architecture.md |
-| 架构 | RISC-V64 主线 + LoongArch64 同源 | docs/01-architecture.md |
+| 架构 | RISC-V64 主线 + LoongArch64 同源（持续维护，功能按主线/适配阶段推进） | docs/01-architecture.md、docs/08 |
 | 兼容目标 | 对齐 Linux UAPI（6.x 语义），不复制 Linux 内部对象模型 | docs/05-syscall-abi.md |
 | 构建 | Kconfig → build.mk → Cargo feature | docs/07-build-and-ci.md |
 | 开发治理 | SDD 治理（引用 `../sdd-governance/`） | docs/08-development-process.md |
@@ -32,8 +32,9 @@
 
 ## 快速开始
 
-前置：Rust 工具链由 `rust-toolchain.toml` 锚定（含 `riscv64gc-unknown-none-elf` 与
-`loongarch64-unknown-none` 两个 target），`rustup` 会自动准备；运行需要 QEMU（>= 8.0）。
+前置：Rust 工具链由 `rust-toolchain.toml` 锚定（官方评测 nightly 集合内版本，含
+`riscv64gc-unknown-none-elf` 与 `loongarch64-unknown-none` 两个 target），`rustup` 会自动准备；
+运行需要 QEMU（版本与评测环境对齐，见 docs/07）。
 
 ```bash
 # 1) 选架构生成配置（架构是 Kconfig 的 choice，切换要连 defconfig 一起重来）
@@ -43,8 +44,10 @@ python tools/kconfig.py --defconfig config/defconfig-riscv64     # 或 defconfig
 make check
 make build            # 产物 build/<ARCH>/kernel.elf，并校验 ELF 入口地址
 
-# 3) 换架构（完整动作，不能只切 ARCH）
-make ARCH=loongarch64 defconfig clean build
+# 3) 换架构（三次独立调用，不能合成一条命令；合成命令会跳过 build.mk 并删除配置）
+make clean
+make ARCH=loongarch64 defconfig
+make ARCH=loongarch64 build
 
 # 4) QEMU 运行
 make run
@@ -54,9 +57,9 @@ python tools/kconfig.py --set LOG_LEVEL_TRACE=y
 ```
 
 其它目标：`make gdb`（等 GDB 连接）、`make fmt` / `make fmt-check`、`make clean`。
-`make test` 在 M0 尚未接入测例（docs/10：用户态测例随 M1 的 init 进程落地）。
+`make test` 尚未接入自动测例（docs/10），接入前该目标明确失败，不代表任何通过。
 
-## 仓库结构（M0）
+## 仓库结构（M1）
 
 ```
 kernel-project/
@@ -66,18 +69,39 @@ kernel-project/
 ├── linker/            # riscv64.ld（0x80200000）、loongarch64.ld（0x00200000）
 ├── tools/             # kconfig.py（自研解析器）、check-image.py（映像门禁）
 ├── src/arch/          # 唯一架构差异入口：riscv64 / loongarch64
-├── src/kernel/        # 核心子系统（M0 只有 kernel::main）
-├── src/klib/          # 日志宏等最底层通用库
+├── src/kernel/        # 核心子系统：mm、trap、klib（M1 现状；task/sched/syscall/fs 待建）
+├── docs/              # 设计文档 00–10
 └── log/               # boundary / change-record 等证据（见 ../sdd-governance/）
 ```
 
-## 状态
+## 当前状态表（2026-10-12）
 
-- 阶段：M0（地基：规范、工具链、双架构 boot）
-- 已落地：SDD 治理落地、Kconfig→build.mk→Cargo feature 构建链、双架构 boot 汇编（已反汇编核对）、可复现构建（SHA-256 校验通过）
-- 未完成：QEMU 上的实际启动与串口输出验证（`make run`，本机无 QEMU），M0 验收尚未关闭
-- 里程碑：见 docs/08-development-process.md（不含时间排期）
+| 能力 | 状态 | 验证证据 |
+|---|---|---|
+| SDD 治理落地（AGENTS/docs/log） | 已实现 | 仓库文档 |
+| Kconfig → build.mk → Cargo feature 构建链 | 已实现，有已知限制 | 见下方已知限制 ③④ |
+| 双架构 boot（RV 0x80200000 / LA 0x200000） | **运行验证通过** | QEMU 9.2.1 双架构 M0/M1 启动日志（log/change/） |
+| 分页激活 + heap（M1） | **运行验证通过** | 双架构 QEMU 至 "M1 paging/trap foundation OK"（log/change/2026-10-11-M0-qemu-boot-fixes.md 等） |
+| RV 用户态 / syscall 闭环 | 尚未运行 | —（M1.5 目标） |
+| 任务 / 调度 / fork | 尚未运行 | 仅设计文档 docs/03 |
+| VFS / 文件 / shell | 尚未运行 | 仅设计文档 docs/04 |
+| 自动测试入口（make test） | 尚未接入 | 接入前明确失败 |
+
+## 已知限制与待修复（来自 2026-10-12 规划书静态审查 + 本地验证）
+
+| 编号 | 问题 | 确认方式 | 状态 |
+|---|---|---|---|
+| ① | 多核进入时重复清 BSS 的条件性竞态（BOOT_LOCK 在 .data 只保护自身，迟到核可能重置已初始化全局状态） | 静态审查（规划书）；QEMU -smp 4 实测未触发 | 待修复（P0） |
+| ② | LoongArch `CSRWR` 汇编 `in(reg)` 约束：指令会把旧 CSR 值写回源寄存器，连续写两个页大小 CSR 时第二次可能不是预期值 | 静态审查（规划书，对照架构手册）；QEMU 实测 LA M1 通过但未反汇编核实该指令序列 | 待修复/待核实（P0） |
+| ③ | `make ARCH=<arch> defconfig clean build` 组合命令失效（跳过 build.mk / 删除配置） | 规划书 `make -n` 复现 | README 已改为三次独立调用（P1） |
+| ④ | `tools/kconfig.py` `_Evaluator._atom` 引用不存在的 `self.symbols`，条件表达式求值会 AttributeError；`--menuconfig` 未实现 | 规划书宿主复现 | 待修复（P1） |
+| ⑤ | LA 内存仅用低 256MiB 段（分段布局）；RV 按构建配置假定物理内存 | 本地实测/静态 | 已知限制（国赛阶段处理） |
+| ⑥ | 用户态前置缺口：trap 用当前 sp（需每任务内核栈）、unmap 后无完整 TLB 协议、连续页分配不复用释放区、自旋锁不屏蔽中断、用户页权限校验不完整 | 静态审查 | 进入 M1.5 前必须收敛 |
+
+> 状态表义务：能力状态必须与「已运行验证 / 仅编译验证 / 尚未运行 / 已知限制 / 后续计划」五类一致；
+> 旧版本成功记录（如 M0 早期日志）不得覆盖当前提交的验证结论。
 
 ## 许可
 
-见 LICENSE.md。默认建议 MIT OR Apache-2.0。
+见 LICENSE.md（当前为占位说明，团队需选定正式许可；华东往届要求公开代码与开发历史、
+文档采用 CC-BY-SA 4.0，本届章程发布后核对）。
