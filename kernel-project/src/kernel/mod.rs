@@ -9,6 +9,10 @@
 
 /// 选主锁：放 `.data`（初值 0 随镜像加载，不在 BSS 清零范围内），
 /// 保证无论哪个核先执行 `swap` 都只有一个成为 bootstrap。
+///
+/// 选主必须在清 BSS **之前**（P0① 修复）：汇编不再清 BSS，所有核进入
+/// kernel_main 时 BSS 未清；主核 = swap 成功者，清 BSS 并初始化，从核直接
+/// 停驻、不清 BSS，消除"迟到核重置主核已初始化全局"的条件性竞态。
 #[link_section = ".data"]
 static BOOT_LOCK: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
 
@@ -28,15 +32,46 @@ pub(crate) mod trap;
 ///   M1 handoff：统一为「先探测固件传参，再回落到固定位置」
 #[no_mangle]
 extern "C" fn kernel_main(hartid: usize, dtb_pa: usize) -> ! {
-    // M0 临时桥：Rust 侧原子选主（汇编只做 per-hart 栈与清 BSS，见 arch/*/boot.rs）。
+    // M0 临时桥：Rust 侧原子选主（汇编只做 per-hart 栈，清 BSS 移到主核专属，
+    // 见 arch/*/boot.rs 与 clear_bss）。
     // 为什么在 Rust 侧：LLVM 对 global_asm 内联汇编的 Zaamo 指令检查与 Rust
     // 生成代码不一致（实测 amoswap 汇编被拒、AtomicBool 可编译）。
-    // 行为边界：非 bootstrap 核直接停机，不触碰控制台与 BSS。
+    // 行为边界：非 bootstrap 核直接停机，不清 BSS、不触碰控制台。
     // 移除条件：M1 arch::setup_all_cores 落地后，选主并入该路径。
     if BOOT_LOCK.swap(true, core::sync::atomic::Ordering::AcqRel) {
         crate::arch::park()
     }
+    // 唯一主核：先清 BSS（此时尚无任何 BSS 全局被初始化），再进入主流程。
+    clear_bss();
     main(hartid, dtb_pa)
+}
+
+/// 主核专属：清零 BSS。必须由唯一 bootstrap 在初始化任何 BSS 全局前执行。
+///
+/// 为什么在 Rust 侧：汇编清 BSS 与多核进入交错存在条件性竞态（规划书 P0①），
+/// 先经 .data 的 BOOT_LOCK 选主、再由唯一主核清零，使清零唯一化且不与初始化交错。
+fn clear_bss() {
+    extern "C" {
+        static __bss_start: u8;
+        static __bss_end: u8;
+    }
+    let start = core::ptr::addr_of!(__bss_start) as usize;
+    let end = core::ptr::addr_of!(__bss_end) as usize;
+    let mut p = start;
+    // SAFETY: __bss_start/__bss_end 由链接脚本保证落在可写 RAM 且区间不重叠任何
+    // 正在使用的数据；清零目标为 BSS，volatile 防编译器合并/消除。
+    // 8 字节块清，尾部不足 8 字节按字节清（__bss_end 由链接脚本定义）。
+    unsafe {
+        while p + 8 <= end {
+            (p as *mut usize).write_volatile(0);
+            p += 8;
+        }
+        while p < end {
+            (p as *mut u8).write_volatile(0);
+            p += 1;
+        }
+    }
+    core::sync::atomic::fence(core::sync::atomic::Ordering::Release);
 }
 
 /// 内核主函数。M0 结束在停机，不做任何"假装继续跑"的事。

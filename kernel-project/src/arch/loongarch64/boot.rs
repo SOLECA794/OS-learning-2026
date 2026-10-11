@@ -33,15 +33,8 @@ _start:
     li.d  $r15, 8192            # BOOT_STACK_SIZE（每核 8K）
     add.d $r3, $r18, $r15       # sp = bottom + (core+1)*size = 该核栈顶
 
-    # 清 BSS（幂等，见 riscv64/boot.rs 说明）。
-    la    $r14, __bss_start
-    la    $r15, __bss_end
-.Lclear_bss:
-    bgeu  $r14, $r15, .Lbss_done
-    st.d  $r0, $r14, 0
-    addi.d $r14, $r14, 8
-    b     .Lclear_bss
-.Lbss_done:
+    # BSS 清零由主核在 kernel_main 内完成（先经 .data 的 BOOT_LOCK 选主再清，
+    # 从核不清、不初始化，直接停驻；见 kernel/mod.rs 与 riscv64/boot.rs 说明）。
     addi.d $r4, $r12, 0          # a0 = hartid（core id）
     addi.d $r5, $r0, 0           # a1 = dtb_pa；LA 入口未提供，语义为「未提供」
     bl    kernel_main

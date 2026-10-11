@@ -30,16 +30,10 @@ _start:
     li t3, 8192                 # BOOT_STACK_SIZE（每核 8K）
     add sp, t5, t3              # sp = bottom + (hartid+1)*size = 该核栈顶
 
-    # 清 BSS。幂等：多个核先后执行只写 0，无副作用；
-    # 每核的 sp 已独立，清零不会覆盖任何正在使用的栈。
-    la t0, __bss_start
-    la t1, __bss_end
-.Lclear_bss:
-    bgeu t0, t1, .Lbss_done
-    sd zero, 0(t0)
-    addi t0, t0, 8
-    j .Lclear_bss
-.Lbss_done:
+    # BSS 清零由主核在 kernel_main 内完成：先经 .data 的 BOOT_LOCK 选主、
+    # 再清 BSS（从核不清、不初始化，直接停驻）。见 kernel/mod.rs。
+    # 为什么不在汇编清：多核并发清 BSS 与主核初始化会交错（条件性竞态，
+    # 2026-10-12 规划书 P0①）；先选主再清使清零唯一化。
     # a0 = hartid、a1 = DTB 物理地址，由 OpenSBI 传入，此处不再搬动。
     call kernel_main
 
