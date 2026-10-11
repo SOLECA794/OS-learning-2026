@@ -69,12 +69,16 @@ impl PageTableEntry {
     }
 }
 
-/// QEMU LoongArch virt 当前只把低 256 MiB 建模为连续低端 RAM。
+/// QEMU 9.2.1 LoongArch virt 要求 ram_size >= 1 GiB 才能启动（M0 实测），
+/// 但地址空间是分段布局：RAM = 低 256 MiB [0, 0x1000_0000) + 高内存 [0x9000_0000, ...)，
+/// 中间是设备 MMIO 区（UART 0x1fe0_0000 / ACPI 0x100e_0000，见 kernel_device_ranges）。
+/// 内核只消费低 256 MiB 连续段；高内存与设备区留待后续接入（不可把 [0, ram_size)
+/// 全当 RAM，否则 free frames 会覆盖设备 MMIO）。
 pub fn physical_memory_range(memory_bytes: usize) -> Option<(usize, usize)> {
-    if memory_bytes == 0 || memory_bytes > LOW_MEMORY_LIMIT {
+    if memory_bytes < LOW_MEMORY_LIMIT {
         return None;
     }
-    Some((0, memory_bytes))
+    Some((0, LOW_MEMORY_LIMIT))
 }
 
 /// 内核页表保持 RAM 身份映射，因此分页切换前后都可用物理地址访问页表页。

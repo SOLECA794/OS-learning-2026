@@ -107,7 +107,14 @@ CARGO_PROFILE_FLAG :=
 CARGO_OUT_DIR      := target/$(RUST_TARGET)/debug
 endif
 
-export RUSTFLAGS := -C link-arg=-T$(LINKER_SCRIPT)
+# LoongArch LLVM target 默认启用 LSX/LASX 向量特性，编译器会生成 vldi/vst 等向量指令；
+# QEMU virt（及 2k1000 实机）默认未启用 LSX，执行即非法指令异常（实测 code 16）。
+# 显式关闭，让代码落在基础 loongarch64 指令集上（docs/07 最小指令集约束）。
+ifeq ($(ARCH),loongarch64)
+	export RUSTFLAGS := -C link-arg=-T$(LINKER_SCRIPT) -C target-feature=-lsx,-lasx
+	else
+	export RUSTFLAGS := -C link-arg=-T$(LINKER_SCRIPT)
+	endif
 
 CARGO      ?= cargo
 PYTHON     ?= python
