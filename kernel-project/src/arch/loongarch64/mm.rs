@@ -129,24 +129,31 @@ pub unsafe fn activate(root_ppn: usize) {
     let refill = __loongarch64_tlb_refill as *const () as usize;
 
     // SAFETY: 所有地址在切换前为物理直址、切换后为页表身份映射；refill 入口是物理地址。
+    //
+    // 汇编约束（P0② 修复，规划书 2026-10-12）：CSRWR/CSRXCHG 会把旧 CSR 值写回
+    // 源寄存器，因此所有被覆盖的操作数必须声明 inlateout（值被覆盖且不再使用），
+    // 不能声明 in(reg)（in 约束要求汇编结束后输入寄存器仍保持原值）。
+    // 0x1e 与 0x8e 两个页大小 CSR 各用独立寄存器装载 12：第一次 CSRWR 后该寄存器
+    // 已变成旧 CSR 值，第二次写入必须重新装载，否则写的是垃圾值（原实现的隐患）。
     unsafe {
         asm!(
             "csrwr {root}, 0x19",
             "csrwr $r0, 0x1a",
             "csrwr {pwcl}, 0x1c",
             "csrwr $r0, 0x1d",
-            "csrwr {page_shift}, 0x1e",
-            "csrwr {page_shift}, 0x8e",
+            "csrwr {ps}, 0x1e",
+            "csrwr {ps2}, 0x8e",
             "csrwr {refill}, 0x88",
             "invtlb 0x0, $r0, $r0",
             "dbar 0",
             "csrxchg {crmd_value}, {crmd_mask}, 0x0",
             "ibar 0",
-            root = in(reg) root,
-            pwcl = in(reg) PWCL,
-            page_shift = in(reg) 12usize,
-            refill = in(reg) refill,
-            crmd_value = in(reg) CRMD_VALUE,
+            root = inlateout(reg) root => _,
+            pwcl = inlateout(reg) PWCL => _,
+            ps = inlateout(reg) 12usize => _,
+            ps2 = inlateout(reg) 12usize => _,
+            refill = inlateout(reg) refill => _,
+            crmd_value = inlateout(reg) CRMD_VALUE => _,
             crmd_mask = in(reg) CRMD_MASK,
             options(nostack),
         );
