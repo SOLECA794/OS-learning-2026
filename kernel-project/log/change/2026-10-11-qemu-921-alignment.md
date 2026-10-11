@@ -37,12 +37,28 @@ M0 change record（2026-10-11-M0-qemu-boot-fixes.md）环境注记指出：官�
 | LA M0 真实启动（9.2.1, -smp 4, -m 1G） | `M0 boot OK`，hartid=0 | agent-run |
 | 与 8.2.2 行为对比 | 语义一致；boot hart 选择随 QEMU/OpenSBI 版本变化（8.2.2 实测 2，9.2.1 实测 RV=3/LA=0），原子选主不受影响 | agent-run |
 
+## 后续：WSL Rust 工具链补齐（同日）
+
+用户确认后安装：rustup（rsproxy 镜像）+ 仓库锁定的工具链 1.94.0
+（`rust-toolchain.toml`）+ `riscv64gc-unknown-none-elf` / `loongarch64-unknown-none`
+target。首次 `make run` 触发工具链下载被 timeout 打断、且 minimal profile 导致
+cargo/rustc 组件缺失，逐一补装后重跑。
+
+### 全链路验证（WSL，build + QEMU 9.2.1）
+
+| 检查项 | 结果 | 验证者 |
+|---|---|---|
+| `make run`（RV，`defconfig-riscv64`） | `M0 boot OK`，hartid=0（默认单核） | agent-run |
+| `make run`（LA，`defconfig-loongarch64`） | `M0 boot OK`，hartid=0 | agent-run |
+| 此前手动 `-smp 4` 验证（9.2.1） | RV hartid=3 / LA hartid=0，均 `M0 boot OK` | agent-run |
+
+至此 M0 验证矩阵的 `make run` 项由 not-run 转为双架构 PASS（本地 WSL 环境）。
+注意 WSL 构建产物与 Windows 构建共享 `target/`（不同 host 工具链由 cargo
+fingerprint 区分，不互相污染）。
+
 ## 残余风险 / 缺口
 
-1. **WSL 无 Rust 工具链**（`make: cargo: No such file or directory`）：`make run`
-   全链路在 WSL 侧不可用（build 阶段失败）。当前等价路径：Windows 侧构建产物 +
-   WSL 侧 9.2.1 直接运行（本次验证即此方式）。如需 WSL 内 `make run` 一步到位，
-   需在 WSL 安装 rustup + riscv64gc/loongarch64 target（未执行，超出本次范围）。
+1. ~~WSL 无 Rust 工具链~~（已解决，见上）。
 2. 源码编译的 9.2.1 与评测镜像内置 9.2.1 构建配置可能有差异（本机构建仅含
    riscv64/loongarch64 两个 target，未启用测试/文档）；核心模拟行为一致。
 3. 官方 Docker 镜像仍推荐在 M1 起作为最终验收环境（工具链整体对齐，不只是 QEMU）。
