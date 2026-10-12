@@ -8,30 +8,43 @@ use core::arch::asm;
 
 const SYS_WRITE: usize = 64;
 const SYS_EXIT: usize = 93;
+const SYS_FORK: usize = 220;
+const SYS_WAIT4: usize = 260;
 
 #[panic_handler]
 fn panic(_: &core::panic::PanicInfo) -> ! {
     loop {}
 }
 
-/// 默认模式（M2 调度验收）：自旋循环 + 周期写，不主动 yield。
-///
-///
-/// 时钟抢占驱动两个任务交替运行；观测点 = 每 500_000 次自旋写一次 tick。
+/// 默认模式（M3 fork 验收）：子写 3 次后 exit(42)；父 wait4 校验 WEXITSTATUS 后 exit(0)。
+/// 时钟抢占保持开启（子/父均可能被抢占，但验收不依赖抢占时序）。
 #[cfg(not(feature = "fault-test"))]
 #[no_mangle]
 extern "C" fn _start() -> ! {
-    // M2 调度验收程序：无主动 yield 的自旋循环，每 500_000 次写一次 tick。
-    // 内核时钟抢占驱动两个任务交替运行；观测点 = 每个任务的 tick 持续推进。
-    let msg = b"tick\n";
-    let mut counter: usize = 0;
-    loop {
-        counter += 1;
-        if counter % 500_000 == 0 {
-            syscall3(SYS_WRITE, [1, msg.as_ptr() as usize, msg.len()]);
-            counter = 0;
-        }
+    let pid = syscall(SYS_FORK, [0; 6]) as isize;
+    if pid < 0 {
+        syscall(SYS_EXIT, [1, 0, 0, 0, 0, 0]);
+        loop {}
     }
+    if pid == 0 {
+        // 子：写 3 个 c 后以 42 退出（wait status 低 8 位）。
+        for _ in 0..3 {
+            syscall(SYS_WRITE, [1, b"c".as_ptr() as usize, 1, 0, 0, 0]);
+        }
+        syscall(SYS_EXIT, [42, 0, 0, 0, 0, 0]);
+        loop {}
+    }
+    // 父：wait4(pid, &status, 0, 0)；校验返回 pid 且 WEXITSTATUS == 42。
+    let mut status: usize = 0;
+    let r = syscall(SYS_WAIT4, [pid as usize, &mut status as *mut usize as usize, 0, 0, 0, 0]);
+    if r == pid && ((status >> 8) & 0xff) == 42 {
+        syscall(SYS_WRITE, [1, b"PASS\n".as_ptr() as usize, 5, 0, 0, 0]);
+        syscall(SYS_EXIT, [0, 0, 0, 0, 0, 0]);
+    } else {
+        syscall(SYS_WRITE, [1, b"FAIL\n".as_ptr() as usize, 5, 0, 0, 0]);
+        syscall(SYS_EXIT, [1, 0, 0, 0, 0, 0]);
+    }
+    loop {}
 }
 
 /// fault-test 模式（W2 附加用例②）：用户态读取内核保护区 0x80200000。
@@ -44,12 +57,12 @@ extern "C" fn _start() -> ! {
 extern "C" fn _start() -> ! {
     let ptr = 0x8020_0000usize as *const u8;
     let _v = core::hint::black_box(unsafe { *ptr });
-    syscall3(SYS_EXIT, [2, 0, 0]);
+    syscall(SYS_EXIT, [2, 0, 0, 0, 0, 0]);
     loop {}
 }
 
 #[inline(never)]
-fn syscall3(id: usize, args: [usize; 3]) -> isize {
+fn syscall(id: usize, args: [usize; 6]) -> isize {
     let ret: isize;
     unsafe {
         asm!(
@@ -57,6 +70,9 @@ fn syscall3(id: usize, args: [usize; 3]) -> isize {
             inlateout("x10") args[0] => ret,
             in("x11") args[1],
             in("x12") args[2],
+            in("x13") args[3],
+            in("x14") args[4],
+            in("x15") args[5],
             in("x17") id,
             options(nostack),
         );

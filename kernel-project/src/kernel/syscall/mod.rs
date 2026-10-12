@@ -10,6 +10,8 @@
 pub const SYSCALL_REBOOT: usize = 142;
 pub const SYSCALL_WRITE: usize = 64;
 pub const SYSCALL_EXIT: usize = 93;
+pub const SYSCALL_FORK: usize = 220;
+pub const SYSCALL_WAIT4: usize = 260;
 
 mod power;
 
@@ -19,6 +21,9 @@ use power::sys_reboot;
 const ENOSYS: isize = 38;
 const EBADF: isize = -9;
 const EFAULT: isize = -14;
+const ECHILD: isize = -10;
+/// wait4 options：WNOHANG（非阻塞）。
+const WNOHANG: usize = 1;
 
 /// 用户可写地址区间的下界（0 页不映射，NULL 解引用受控）。
 const USER_TEXT_BASE: usize = 0x10000;
@@ -30,7 +35,18 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
         // Linux reboot(2) ABI：a0=magic1, a1=magic2, a2=cmd, a3=arg
         SYSCALL_REBOOT => sys_reboot(args[0] as u32, args[1] as u32, args[2] as u32, args[3]),
         SYSCALL_WRITE => sys_write(args[0], args[1], args[2]),
-        SYSCALL_EXIT => sys_exit(args[0]),
+        // exit/fork/wait4 依赖 task 模块（RV 用户态调度）；LA 用户态未实现，回落 ENOSYS。
+        #[cfg(feature = "arch-riscv64")]
+        SYSCALL_EXIT => crate::kernel::task::exit_current(args[0] as i32),
+        // fork：返回子任务 id（>0）；子进程侧现场 a0 已置 0。
+        #[cfg(feature = "arch-riscv64")]
+        SYSCALL_FORK => match crate::kernel::task::fork_current() {
+            Ok(pid) => pid as isize,
+            Err(errno) => errno,
+        },
+        // wait4(pid, wstatus, options, rusage)：仅 pid/wstatus/options，rusage 忽略。
+        #[cfg(feature = "arch-riscv64")]
+        SYSCALL_WAIT4 => sys_wait4(args[0], args[1], args[2]),
         _ => -ENOSYS,
     }
 }
@@ -67,8 +83,41 @@ fn sys_write(fd: usize, buf: usize, len: usize) -> isize {
     len as isize
 }
 
-/// exit(code)：记录退出并停机（M1.5 单任务无调度；M3 换为回收 + 调度）。
-fn sys_exit(code: usize) -> isize {
-    crate::log_info!("user program exited with code {}", code);
-    crate::arch::park()
+/// 向用户内存写一个 usize（wait status 等）。段边界校验同 copy_from_user；
+/// SUM=1 处理期内核可直接写用户页。
+fn copy_to_user(dst: usize, value: usize) -> Result<(), isize> {
+    let end = dst.checked_add(core::mem::size_of::<usize>()).ok_or(EFAULT)?;
+    if dst < USER_TEXT_BASE || end > USER_STACK_TOP {
+        return Err(EFAULT);
+    }
+    // SAFETY: 边界已校验且当前激活页表含用户段映射（SUM=1）。
+    unsafe { (dst as *mut usize).write(value) };
+    Ok(())
+}
+
+/// wait4(pid, wstatus, options)：阻塞循环——子已退出则回收并写 status（WEXITSTATUS 编码），
+/// 未退出则 Waiting 阻塞（子 exit 唤醒后重查），无子返回 ECHILD，WNOHANG 时不阻塞返回 0。
+#[cfg(feature = "arch-riscv64")]
+fn sys_wait4(pid: usize, status_ptr: usize, options: usize) -> isize {
+    loop {
+        match crate::kernel::task::wait4_step(pid as isize) {
+            crate::kernel::task::WaitResult::Reaped { pid, exit_code } => {
+                if status_ptr != 0 {
+                    let status = ((exit_code & 0xff) as usize) << 8;
+                    if copy_to_user(status_ptr, status).is_err() {
+                        return EFAULT;
+                    }
+                }
+                return pid as isize;
+            }
+            crate::kernel::task::WaitResult::WouldBlock => {
+                if options & WNOHANG != 0 {
+                    return 0;
+                }
+                // 阻塞：Waiting + 调度切走；子 exit 唤醒后重查。
+                crate::kernel::task::block_current_and_wait();
+            }
+            crate::kernel::task::WaitResult::NoChild => return ECHILD,
+        }
+    }
 }

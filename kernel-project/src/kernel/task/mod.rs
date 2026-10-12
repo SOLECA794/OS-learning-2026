@@ -81,9 +81,28 @@ impl<T> Drop for SpinLockGuard<'_, T> {
     }
 }
 
-/// 任务控制块（W3 最小字段集）。
+/// 任务生命周期状态。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TaskState {
+    /// 就绪：在就绪队列中等待调度。
+    Ready,
+    /// 当前占用 CPU（不在就绪队列）。
+    Running,
+    /// 等待子任务退出（不在就绪队列；子 exit 时唤醒）。
+    Waiting,
+    /// 已退出（僵尸，等待父回收；不在就绪队列）。
+    Exited,
+}
+
+/// 任务控制块。
 pub(crate) struct TaskControlBlock {
     pub id: usize,
+    /// 父任务 id；boot 首任务为 None。
+    pub parent: Option<usize>,
+    /// 生命周期状态（驱动 schedule 的入队/回收决策）。
+    pub state: TaskState,
+    /// 退出码（Linux 语义：低 8 位经 wait status 编码返回）。
+    pub exit_code: i32,
     /// 用户地址空间（含内核身份映射；切任务时 activate 本空间根页表）。
     pub space: Box<MemorySet>,
     /// 内核栈（生命周期所有者；TrapContext 位于栈顶下方）。
@@ -162,6 +181,9 @@ pub(crate) fn create_task(elf: &crate::kernel::elf::Elf, uapp: &[u8]) -> Result<
 
     Ok(TaskControlBlock {
         id: 0, // 由 Scheduler::push 重新分配
+        parent: None,
+        state: TaskState::Running, // boot 首任务直进用户态
+        exit_code: 0,
         space: Box::new(space),
         kstack,
         task_ctx,
@@ -200,9 +222,22 @@ pub(crate) fn schedule() {
     let (old_ptr, new_ptr, new_ppn, from_id, to_id) = {
         let mut sched = SCHED.lock();
         let current = sched.current;
-        let next = {
+        // Ready/Running 任务重新入队（Running 被抢占后回 Ready 等下次调度）；
+        // Waiting/Exited 不再调度。
+        let state = sched.tasks[current].as_ref().unwrap().state;
+        if state == TaskState::Ready || state == TaskState::Running {
+            sched.tasks[current].as_mut().unwrap().state = TaskState::Ready;
             sched.ready.push_back(current);
-            sched.ready.pop_front().expect("ready queue empty after re-enqueue")
+        }
+        let next = match sched.ready.pop_front() {
+            Some(next) => next,
+            None => {
+                // 就绪队列空：全员阻塞/退出。W4 无事件机制（boundary 登记）→ park 停机。
+                drop(sched);
+                crate::log_info!("[sched] ready queue empty, parking");
+                crate::arch::park();
+                unreachable!("park returned")
+            }
         };
         if next == current {
             return;
@@ -235,7 +270,7 @@ pub(crate) fn schedule() {
     unsafe { arch::mm::activate(my_ppn) };
 }
 
-/// RV 启动双任务（M2）：定时器先行，T0 直进用户态，T1 就绪等待时钟抢占。
+/// RV 启动单任务（M3）：T0 直进用户态，由 uapp 自行 fork 建立父子关系。
 pub(crate) fn boot_tasks() -> ! {
     crate::arch::timer::init();
     #[cfg(feature = "uapp-fault-test")]
@@ -246,12 +281,144 @@ pub(crate) fn boot_tasks() -> ! {
     let elf = crate::kernel::elf::parse(uapp).expect("uapp ELF parse failed");
 
     let t0 = create_task(&elf, uapp).expect("task0 create failed");
-    let t1 = create_task(&elf, uapp).expect("task1 create failed");
     let (ppn, ctx) = launch_first(t0);
-    push_ready(t1);
 
-    crate::log_info!("M2: two tasks ready (ids 0/1), timer armed, entering user mode");
+    crate::log_info!("M3: task 0 ready, timer armed, entering user mode (uapp will fork)");
     // SAFETY: ppn 是 T0 的有效根页表（launch_first 返回）。
     unsafe { arch::mm::activate(ppn) };
     arch::trap::restore_from(ctx)
+}
+
+/// wait4 单步检查结果。
+pub(crate) enum WaitResult {
+    /// 子已退出并完成回收（槽已释放，调用方不得再引用）。
+    Reaped { pid: usize, exit_code: i32 },
+    /// 存在未退出的子任务（调用方可选择阻塞等待）。
+    WouldBlock,
+    /// 没有匹配的子任务（Linux ECHILD）。
+    NoChild,
+}
+
+/// fork：复制当前任务地址空间与现场，登记子任务并放入就绪队列，返回子任务 id。
+///
+/// 子进程从 fork 返回 0（现场 a0 改写、sepc 不变 → 从 fork 返回处继续）；父进程返回子 id。
+/// 普通复制（非 COW；COW 为 W7-8 条件增强项）。
+pub(crate) fn fork_current() -> Result<usize, isize> {
+    const ENOMEM: isize = -12;
+    let layout = crate::kernel::mm::kernel_space::KernelImageLayout::current();
+    let memory_bytes = crate::kernel::mm::configured_memory_bytes();
+    let (_, memory_end) = arch::mm::physical_memory_range(memory_bytes).expect("memory range");
+
+    let mut sched = SCHED.lock();
+    let current = sched.current;
+
+    // 复制地址空间（借用父 TCB 的块结束后再 push 子任务，避免 &mut 冲突）。
+    let new_space = {
+        let parent = sched.tasks[current].as_ref().unwrap();
+        parent
+            .space
+            .dup(layout, VirtAddr::new(memory_end))
+            .map_err(|_| ENOMEM)?
+    };
+
+    // 新内核栈 + 子现场（父现场副本，a0=0）。
+    let (kstack, task_ctx) = {
+        let parent = sched.tasks[current].as_ref().unwrap();
+        let kstack = KernelStack::new().map_err(|_| ENOMEM)?;
+        let kstack_top = kstack.top();
+        let frame_size = core::mem::size_of::<arch::trap::TrapContext>();
+        let parent_ctx_ptr = (parent.kstack.top() - frame_size) as *const arch::trap::TrapContext;
+        // SAFETY: 父现场位于其内核栈顶下方，trap 处理期间有效。
+        let mut child_ctx = unsafe { *parent_ctx_ptr };
+        child_ctx.set_syscall_return(0);
+        let context_ptr = (kstack_top - frame_size) as *mut arch::trap::TrapContext;
+        // SAFETY: 新内核栈顶下方，本函数独占。
+        unsafe { context_ptr.write(child_ctx) };
+        let task_ctx = arch::task::TaskContext {
+            ra: arch::task::trap_return_address(),
+            sp: kstack_top - frame_size,
+            ..arch::task::TaskContext::zero_init()
+        };
+        (kstack, task_ctx)
+    };
+
+    let child_tcb = TaskControlBlock {
+        id: 0,
+        parent: Some(current),
+        state: TaskState::Ready,
+        exit_code: 0,
+        space: Box::new(new_space),
+        kstack,
+        task_ctx,
+    };
+    let child_id = sched.push(child_tcb);
+    sched.ready.push_back(child_id);
+    crate::log_info!("[fork] task {} forked task {} (frames={})", current, child_id, crate::kernel::mm::frame_allocator::allocated_count());
+    Ok(child_id)
+}
+
+/// exit：标记 Exited 并存储退出码；唤醒等待本任务的父；调度切走，永不返回。
+///
+/// 资源不立即释放（僵尸语义）：父 wait4 回收时 drop space/kstack。
+pub(crate) fn exit_current(code: i32) -> ! {
+    let current = {
+        let mut sched = SCHED.lock();
+        let current = sched.current;
+        {
+            let t = sched.tasks[current].as_mut().unwrap();
+            t.state = TaskState::Exited;
+            t.exit_code = code;
+        }
+        // 唤醒等待本任务退出的父（保守唤醒：父 wait 重查后再决定阻塞与否）。
+        let parent = sched.tasks[current].as_ref().unwrap().parent;
+        if let Some(pid) = parent {
+            if let Some(p) = sched.tasks[pid].as_mut() {
+                if p.state == TaskState::Waiting {
+                    p.state = TaskState::Ready;
+                    sched.ready.push_back(pid);
+                }
+            }
+        }
+        current
+    };
+    crate::log_info!("[exit] task {} exited with code {}", current, code);
+    schedule(); // Exited 不入队，切走；队列空则 park。
+    unreachable!("exited task resumed")
+}
+
+/// wait4 单步：子已退出 → 回收并返回；存在未退出子 → WouldBlock；无子 → NoChild。
+pub(crate) fn wait4_step(pid: isize) -> WaitResult {
+    let mut sched = SCHED.lock();
+    let current = sched.current;
+    let found = sched.tasks.iter().enumerate().find(|(id, slot)| {
+        *id != current
+            && slot
+                .as_ref()
+                .map_or(false, |t| t.parent == Some(current) && (pid < 0 || *id as isize == pid))
+    });
+    match found {
+        Some((child_id, Some(tcb))) if tcb.state == TaskState::Exited => {
+            let exit_code = tcb.exit_code;
+            // NLL：tcb 借用已在最后一次使用结束，槽回收合法。
+            let _ = found;
+            // 回收：drop space/kstack（Box 释放），槽位置空。
+            sched.tasks[child_id] = None;
+            crate::log_info!("[wait] reaped task {} code {} (frames={})", child_id, exit_code, crate::kernel::mm::frame_allocator::allocated_count());
+            WaitResult::Reaped { pid: child_id, exit_code }
+        }
+        Some(_) => WaitResult::WouldBlock,
+        None => WaitResult::NoChild,
+    }
+}
+
+/// 当前任务阻塞等待子任务：状态 Waiting（不入就绪队列）后调度切走；
+/// 被唤醒后从 schedule 返回，调用方应重新执行 wait 检查。
+pub(crate) fn block_current_and_wait() {
+    {
+        let mut sched = SCHED.lock();
+        let current = sched.current;
+        let t = sched.tasks[current].as_mut().unwrap();
+        t.state = TaskState::Waiting;
+    }
+    schedule();
 }

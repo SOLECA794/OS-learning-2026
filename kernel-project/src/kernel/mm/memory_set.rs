@@ -272,6 +272,50 @@ impl MemorySet {
         Ok(())
     }
 
+    /// 完整复制地址空间（fork 用）：Framed 区域逐页分配新物理页并拷贝内容，
+    /// Identity 区域（内核映射等）跳过、按参数重建一次内核映射。
+    ///
+    /// 注意：不触发 TLB 操作，调用方需在激活后按需刷新。
+    pub fn dup(
+        &self,
+        layout: KernelImageLayout,
+        physical_memory_end: VirtAddr,
+    ) -> Result<Self, MemoryError> {
+        let mut new_set = Self::new_bare()?;
+        new_set.insert_kernel_mapping(layout, physical_memory_end)?;
+        for area in self.areas.iter().flatten() {
+            if area.map_type != MapType::Framed {
+                continue;
+            }
+            let new_area = MapArea {
+                range: area.range,
+                map_type: MapType::Framed,
+                permissions: area.permissions,
+                memory_type: area.memory_type,
+            };
+            new_set.insert(new_area)?;
+            // 逐页拷贝内容：源/目标均为各自页表持有的物理页，内核 identity 映射可直访。
+            let mut vpn = area.range.start();
+            while vpn < area.range.end() {
+                let src_ppn = self
+                    .page_table
+                    .translate(vpn)
+                    .ok_or(MemoryError::AreaNotFound)?;
+                let dst_ppn = new_set
+                    .page_table
+                    .translate(vpn)
+                    .ok_or(MemoryError::AreaNotFound)?;
+                let src = (src_ppn.value() << super::address::PAGE_SHIFT) as *const u8;
+                let dst = (dst_ppn.value() << super::address::PAGE_SHIFT) as *mut u8;
+                // SAFETY: 两物理页均已分配且由各自页表持有，区间 = PAGE_SIZE。
+                unsafe {
+                    core::ptr::copy_nonoverlapping(src, dst, super::address::PAGE_SIZE);
+                }
+                vpn = vpn.checked_add(1)?;
+            }
+        }
+        Ok(new_set)
+    }
     /// 内核映像身份映射（代码/rodata/data/bss/boot 栈/空闲 RAM/必需 MMIO）。
     fn insert_kernel_mapping(
         &mut self,
