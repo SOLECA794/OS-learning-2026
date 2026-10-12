@@ -1,7 +1,7 @@
 #![no_std]
 #![no_main]
 
-//! M1.5 最小用户程序：write(1, ...) 后 exit(0)。
+//! 用户态测试程序：write(1, ...)（M1.5 起）；M2 起默认模式为无主动 yield 的自旋循环。
 //! 链接基址 0x10000（user/user.ld）；系统调用用 RV 内联汇编 ecall。
 
 use core::arch::asm;
@@ -14,23 +14,24 @@ fn panic(_: &core::panic::PanicInfo) -> ! {
     loop {}
 }
 
-/// 默认模式（W2 附加用例）：三连测后按结果退出。
+/// 默认模式（M2 调度验收）：自旋循环 + 周期写，不主动 yield。
 ///
-/// 校验 syscall 错误语义（规划书 W2 验收：非法指针受控、错误 fd 受控）：
-///   1. write(1, msg, 21)        → 期望 21（完整写入，msg 真实长度 21）
-///   2. write(1, NULL, 5)        → 期望 -14（EFAULT：0 页未映射，低于用户区下界）
-///   3. write(2, msg, 21)        → 期望 -9（EBADF：当前仅支持 fd=1）
-/// 全部符合 → exit(0)；否则 exit(1)，退出码可被内核日志观测。
+///
+/// 时钟抢占驱动两个任务交替运行；观测点 = 每 500_000 次自旋写一次 tick。
 #[cfg(not(feature = "fault-test"))]
 #[no_mangle]
 extern "C" fn _start() -> ! {
-    let msg = b"hello from user mode\n";
-    let r1 = syscall3(SYS_WRITE, [1, msg.as_ptr() as usize, msg.len()]);
-    let r2 = syscall3(SYS_WRITE, [1, 0, 5]);
-    let r3 = syscall3(SYS_WRITE, [2, msg.as_ptr() as usize, msg.len()]);
-    let ok = r1 == 21 && r2 == -14 && r3 == -9;
-    syscall3(SYS_EXIT, [if ok { 0 } else { 1 }, 0, 0]);
-    loop {}
+    // M2 调度验收程序：无主动 yield 的自旋循环，每 500_000 次写一次 tick。
+    // 内核时钟抢占驱动两个任务交替运行；观测点 = 每个任务的 tick 持续推进。
+    let msg = b"tick\n";
+    let mut counter: usize = 0;
+    loop {
+        counter += 1;
+        if counter % 500_000 == 0 {
+            syscall3(SYS_WRITE, [1, msg.as_ptr() as usize, msg.len()]);
+            counter = 0;
+        }
+    }
 }
 
 /// fault-test 模式（W2 附加用例②）：用户态读取内核保护区 0x80200000。

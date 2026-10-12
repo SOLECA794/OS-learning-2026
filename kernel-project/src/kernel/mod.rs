@@ -19,6 +19,8 @@ static BOOT_LOCK: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBoo
 pub(crate) mod elf;
 pub(crate) mod mm;
 mod syscall;
+#[cfg(feature = "arch-riscv64")]
+pub(crate) mod task;
 pub(crate) mod trap;
 
 /// 汇编入口 `kernel_main` 的 Rust 侧实现。
@@ -101,7 +103,21 @@ pub fn main(hartid: usize, dtb_pa: usize) -> ! {
 ///
 /// 流程：ELF 解析 → 用户 MemorySet（内核映射+用户段+用户栈）→ 拷段内容 →
 /// 激活用户页表 → 内核栈顶放置 TrapContext → sscratch=栈顶 → restore 进 U 模式。
+#[cfg(feature = "arch-riscv64")]
 fn init_user() -> ! {
+    // M2 起：双任务 + 用户态时钟抢占（W3，见 log/boundary/M2-scheduler-rv.md）。
+    crate::kernel::task::boot_tasks()
+}
+
+#[cfg(feature = "arch-loongarch64")]
+fn init_user() -> ! {
+    // LA 保持单任务路径（W9-10 排期对齐用户态调度）。
+    init_user_legacy()
+}
+
+/// LA 单任务路径（原 M1.5 逻辑）。
+#[cfg(feature = "arch-loongarch64")]
+fn init_user_legacy() -> ! {
     // 默认内嵌 uapp.elf；`make test-fault` 时经 feature 切换为 uapp_fault.elf
     // （用户态访问内核保护区的独立测试程序，见 W2 附加用例 change record）。
     #[cfg(feature = "uapp-fault-test")]

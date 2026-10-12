@@ -17,7 +17,7 @@ compile_error!("必须启用 arch-riscv64 或 arch-loongarch64；请通过 make 
 mod riscv64;
 #[cfg(feature = "arch-riscv64")]
 pub use self::riscv64::{
-    console, mm, park, power_off, restart, trap, trap::TrapContext, ARCH_NAME, LINK_BASE,
+    console, mm, park, power_off, restart, task, timer, trap, trap::TrapContext, ARCH_NAME, LINK_BASE,
 };
 
 #[cfg(feature = "arch-loongarch64")]

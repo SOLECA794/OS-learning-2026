@@ -65,6 +65,11 @@ impl TrapContext {
 
     /// 构造用户态入口上下文：PRMD.PPLV=0b11（U 模式）+ PIE=1，sp=用户栈顶，era=入口。
     /// M1.5 中 LA 侧 `restore_from` 为占位停驻，本构造器供 LA 用户态移植阶段使用。
+    /// trap 现场保存的栈指针（$r3 槽）。
+    pub const fn sp(&self) -> usize {
+        self.registers[3]
+    }
+
     pub fn new_user(entry: usize, user_sp: usize) -> Self {
         const PRMD_USER_PIE: usize = USER_PLV | (1 << 2);
         let mut ctx = Self {

@@ -33,8 +33,15 @@ fn handle_trap(context: &mut crate::arch::TrapContext) {
         TrapCause::InstructionPageFault | TrapCause::LoadPageFault | TrapCause::StorePageFault => {
             fatal_trap(context, cause, "page-fault handling is not implemented")
         }
+        #[cfg(feature = "arch-riscv64")]
+        TrapCause::Interrupt { code } if code == 5 => {
+            // S 态时钟中断（STI）：重设下一次触发后进入调度（先用户态抢占）。
+            // 内核态不抢占：handler 期间 sstatus.SIE=0，不会在此路径嵌套。
+            crate::arch::timer::set_next_trigger();
+            crate::kernel::task::schedule();
+        }
         TrapCause::Interrupt { .. } => {
-            fatal_trap(context, cause, "interrupt handling is not implemented")
+            fatal_trap(context, cause, "unhandled interrupt")
         }
         TrapCause::Breakpoint => {
             fatal_trap(context, cause, "breakpoint handling is not implemented")
