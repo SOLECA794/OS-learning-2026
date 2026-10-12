@@ -304,7 +304,10 @@ pub(crate) fn boot_tasks() -> ! {
     crate::kernel::fs::init();
     #[cfg(feature = "uapp-fault-test")]
     const UAPP_ELF: &[u8] = include_bytes!("../../../build/user/uapp_fault.elf");
-    #[cfg(not(feature = "uapp-fault-test"))]
+    // G5 shell 演示模式（make run-shell）：task0 = shell.elf，跑固定输入脚本 /cmds.txt。
+    #[cfg(all(feature = "uapp-shell", not(feature = "uapp-fault-test")))]
+    const UAPP_ELF: &[u8] = include_bytes!("../../../build/user/shell.elf");
+    #[cfg(all(not(feature = "uapp-shell"), not(feature = "uapp-fault-test")))]
     const UAPP_ELF: &[u8] = include_bytes!("../../../build/user/uapp.elf");
     let uapp: &[u8] = UAPP_ELF;
     let elf = crate::kernel::elf::parse(uapp).expect("uapp ELF parse failed");

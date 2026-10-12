@@ -79,6 +79,8 @@ build: user
 USER_ELF := build/user/uapp.elf
 # G4：exec 目标程序（uapp2）随 user 目标一并构建并拷入 build/user。
 USER_ELF2 := build/user/uapp2.elf
+# G5：小 shell（uapp-shell 模式 task0），随 user 目标一并构建。
+USER_SHELL_ELF := build/user/shell.elf
 # user crate 的 .cargo/config.toml 不会被 --manifest-path 模式发现（cargo 从 CWD 找配置），
 # 因此 target 与链接脚本在此显式声明。
 # -T 必须用 $(CURDIR) 绝对路径：rustc 链接时工作目录会切到临时目录，相对路径找不到脚本。
@@ -91,7 +93,8 @@ user:
 	RUSTFLAGS="$(USER_RUSTFLAGS)" $(CARGO) build --release --manifest-path user/Cargo.toml --target $(USER_TARGET)
 	@cp user/target/riscv64gc-unknown-none-elf/release/uapp $(USER_ELF)
 	@cp user/target/riscv64gc-unknown-none-elf/release/uapp2 $(USER_ELF2)
-	@echo "用户程序：$(USER_ELF) $(USER_ELF2)"
+	@cp user/target/riscv64gc-unknown-none-elf/release/shell $(USER_SHELL_ELF)
+	@echo "用户程序：$(USER_ELF) $(USER_ELF2) $(USER_SHELL_ELF)"
 
 ## W2 附加用例：fault 模式用户程序（make test-fault 专用）--------------------------
 
@@ -114,6 +117,20 @@ build-fault: user-fault
 # 验收：用户态访问内核保护区 → fatal trap 受控停机（from_user=true）。
 test-fault: build-fault
 	@bash scripts/run-test.sh "$(QEMU_BIN)" "$(QEMU_FLAGS)" "fatal trap: reason=.*from_user=true" "W2 内核保护区访问受控"
+
+# G5 小 shell 演示：与 build 同构，但 kernel 侧多开 uapp-shell feature（task0 = shell.elf）。
+build-shell: user
+	@mkdir -p $(BUILD_DIR)
+	$(CARGO) build --target $(RUST_TARGET) --features $(RUST_FEATURES),uapp-shell $(CARGO_PROFILE_FLAG)
+	@cp $(CARGO_OUT_DIR)/$(KERNEL_NAME) $(KERNEL_ELF)
+	@$(PYTHON) tools/check-image.py $(KERNEL_ELF) $(LINK_BASE) $(ARCH)
+	@echo "产物：$(KERNEL_ELF)（uapp-shell 模式）"
+
+# G5 shell 实机演示（V2 §9：固定输入脚本 /cmds.txt + ready 标记）。
+run-shell: build-shell
+	@command -v $(QEMU_BIN) >/dev/null 2>&1 || \
+		{ echo "未找到 $(QEMU_BIN)。请安装 QEMU（>=8.0）并加入 PATH 后再运行 make run-shell。"; exit 1; }
+	$(QEMU_BIN) $(QEMU_FLAGS)
 
 ## 运行（注意：会真正启动 QEMU，仅在用户明确要求时使用）------------------------
 

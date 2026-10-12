@@ -6,8 +6,9 @@
 
 use alloc::sync::Arc;
 use alloc::vec::Vec;
+use core::sync::atomic::AtomicUsize;
 
-use super::file::OpenFileDesc;
+use super::file::{FdEntry, OpenFileDesc};
 use super::programs::PROGRAMS;
 use crate::kernel::task::SpinLock;
 
@@ -60,6 +61,10 @@ pub fn init() {
         name: b"fork.txt".to_vec(),
         content: b"abcdef".to_vec(),
     });
+    fs.files.push(RamFile {
+        name: b"cmds.txt".to_vec(),
+        content: b"ls\ncat /hello.txt\nrun /uapp2\ncat /nonexist\nrun /nonexist\n".to_vec(),
+    });
     drop(fs);
     crate::log_info!("[fs] ramfs init: {} files", {
         let fs = RAMFS.lock();
@@ -77,13 +82,17 @@ pub fn read_file_by_path(path: &str) -> Result<Vec<u8>, isize> {
 }
 
 /// open：查文件；不存在且 O_CREAT 时创建；O_TRUNC 清空内容。返回打开描述。
-pub fn open(name: Vec<u8>, flags: usize) -> Result<Arc<OpenFileDesc>, isize> {
+pub fn open(name: Vec<u8>, flags: usize) -> Result<FdEntry, isize> {
     // 与 read_file_by_path 一致：去前导 '/'（G5 F1 实机发现 open 缺 trim）。
     let name = name
         .iter()
         .copied()
         .skip_while(|&b| b == b'/')
         .collect::<Vec<u8>>();
+    // 根目录（"/"）：返回目录表项（G5 shell ls 用）。
+    if name.is_empty() {
+        return Ok(FdEntry::Dir(Arc::new(AtomicUsize::new(0))));
+    }
     const O_WRONLY: usize = 1;
     const O_RDWR: usize = 2;
     const O_CREAT: usize = 0x40;
@@ -118,7 +127,9 @@ pub fn open(name: Vec<u8>, flags: usize) -> Result<Arc<OpenFileDesc>, isize> {
         }
     }
     drop(fs);
-    Ok(Arc::new(OpenFileDesc::new(name, readable, writable)))
+    Ok(FdEntry::File(Arc::new(OpenFileDesc::new(
+        name, readable, writable,
+    ))))
 }
 
 /// 读：从 desc 偏移复制到用户缓冲（段校验由调用方做），推进共享偏移。

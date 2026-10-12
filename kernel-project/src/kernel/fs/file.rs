@@ -37,13 +37,15 @@ impl OpenFileDesc {
     }
 }
 
-/// FD 表项：控制台或打开文件（V2 §9 具体 enum，不抽象 VFS）。
+/// FD 表项：控制台、打开文件或目录（V2 §9 具体 enum，不抽象 VFS）。
 #[derive(Clone)]
 pub enum FdEntry {
     /// 标准 I/O（fd 0/1/2）：read 返回 EOF(0)，write 输出到控制台。
     Console,
     /// 打开文件：Arc 共享 → dup/fork 继承同一偏移。
     File(Arc<OpenFileDesc>),
+    /// 打开的目录（G5 shell：ramfs 根目录）：枚举游标（getdents64 进度）。
+    Dir(Arc<AtomicUsize>),
 }
 
 /// 进程 FD 表：fd = Vec 索引；None = 空槽（可复用）。

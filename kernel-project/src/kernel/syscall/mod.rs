@@ -17,6 +17,7 @@ pub const SYSCALL_DUP: usize = 23;
 pub const SYSCALL_OPENAT: usize = 56;
 pub const SYSCALL_CLOSE: usize = 57;
 pub const SYSCALL_READ: usize = 63;
+pub const SYSCALL_GETDENTS64: usize = 217;
 
 #[cfg(feature = "arch-riscv64")]
 mod exec;
@@ -55,6 +56,8 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
         SYSCALL_OPENAT => fd::sys_openat(args[0], args[1], args[2]),
         #[cfg(feature = "arch-riscv64")]
         SYSCALL_DUP => fd::sys_dup(args[0]),
+        #[cfg(feature = "arch-riscv64")]
+        SYSCALL_GETDENTS64 => fd::sys_getdents64(args[0], args[1], args[2]),
         // exit/fork/wait4 依赖 task 模块（RV 用户态调度）；LA 用户态未实现，回落 ENOSYS。
         #[cfg(feature = "arch-riscv64")]
         SYSCALL_EXIT => crate::kernel::task::exit_current(args[0] as i32),
