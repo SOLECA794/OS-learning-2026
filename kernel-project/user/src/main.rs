@@ -11,39 +11,45 @@ const SYS_EXIT: usize = 93;
 const SYS_FORK: usize = 220;
 const SYS_WAIT4: usize = 260;
 
+/// G1 连续页复用验收轮数：每轮 fork 一子并 wait 回收。
+/// 8 轮后内核侧帧计数应每轮对称（fork 后 / wait 后数值逐轮一致），
+/// 分配器 bump 水位不应随轮次增长（空闲块复用生效）。
+const ROUNDS: usize = 8;
+
 #[panic_handler]
 fn panic(_: &core::panic::PanicInfo) -> ! {
     loop {}
 }
 
-/// 默认模式（M3 fork 验收）：子写 3 次后 exit(42)；父 wait4 校验 WEXITSTATUS 后 exit(0)。
+/// 默认模式（G4 fork 验收循环）：每轮 fork 一子（子写 1 个 c 后 exit(42)），
+/// 父 wait4 校验 WEXITSTATUS==42，打印 'R'；8 轮全过后打印 PASS 并 exit(0)。
 /// 时钟抢占保持开启（子/父均可能被抢占，但验收不依赖抢占时序）。
 #[cfg(not(feature = "fault-test"))]
 #[no_mangle]
 extern "C" fn _start() -> ! {
-    let pid = syscall(SYS_FORK, [0; 6]) as isize;
-    if pid < 0 {
-        syscall(SYS_EXIT, [1, 0, 0, 0, 0, 0]);
-        loop {}
-    }
-    if pid == 0 {
-        // 子：写 3 个 c 后以 42 退出（wait status 低 8 位）。
-        for _ in 0..3 {
-            syscall(SYS_WRITE, [1, b"c".as_ptr() as usize, 1, 0, 0, 0]);
+    for _ in 0..ROUNDS {
+        let pid = syscall(SYS_FORK, [0; 6]) as isize;
+        if pid < 0 {
+            syscall(SYS_WRITE, [1, b"FORK_FAIL\n".as_ptr() as usize, 10, 0, 0, 0]);
+            syscall(SYS_EXIT, [1, 0, 0, 0, 0, 0]);
+            loop {}
         }
-        syscall(SYS_EXIT, [42, 0, 0, 0, 0, 0]);
-        loop {}
+        if pid == 0 {
+            syscall(SYS_WRITE, [1, b"c".as_ptr() as usize, 1, 0, 0, 0]);
+            syscall(SYS_EXIT, [42, 0, 0, 0, 0, 0]);
+            loop {}
+        }
+        let mut status: usize = 0;
+        let r = syscall(SYS_WAIT4, [pid as usize, &mut status as *mut usize as usize, 0, 0, 0, 0]);
+        if r != pid || ((status >> 8) & 0xff) != 42 {
+            syscall(SYS_WRITE, [1, b"FAIL\n".as_ptr() as usize, 5, 0, 0, 0]);
+            syscall(SYS_EXIT, [1, 0, 0, 0, 0, 0]);
+            loop {}
+        }
+        syscall(SYS_WRITE, [1, b"R".as_ptr() as usize, 1, 0, 0, 0]);
     }
-    // 父：wait4(pid, &status, 0, 0)；校验返回 pid 且 WEXITSTATUS == 42。
-    let mut status: usize = 0;
-    let r = syscall(SYS_WAIT4, [pid as usize, &mut status as *mut usize as usize, 0, 0, 0, 0]);
-    if r == pid && ((status >> 8) & 0xff) == 42 {
-        syscall(SYS_WRITE, [1, b"PASS\n".as_ptr() as usize, 5, 0, 0, 0]);
-        syscall(SYS_EXIT, [0, 0, 0, 0, 0, 0]);
-    } else {
-        syscall(SYS_WRITE, [1, b"FAIL\n".as_ptr() as usize, 5, 0, 0, 0]);
-        syscall(SYS_EXIT, [1, 0, 0, 0, 0, 0]);
-    }
+    syscall(SYS_WRITE, [1, b"PASS\n".as_ptr() as usize, 5, 0, 0, 0]);
+    syscall(SYS_EXIT, [0, 0, 0, 0, 0, 0]);
     loop {}
 }
 

@@ -353,7 +353,7 @@ pub(crate) fn fork_current() -> Result<usize, isize> {
     };
     let child_id = sched.push(child_tcb);
     sched.ready.push_back(child_id);
-    crate::log_info!("[fork] task {} forked task {} (frames={})", current, child_id, crate::kernel::mm::frame_allocator::allocated_count());
+    crate::log_info!("[fork] task {} forked task {}  (frames={} wm={})", current, child_id, crate::kernel::mm::frame_allocator::allocated_count(), crate::kernel::mm::frame_allocator::bump_watermark());
     Ok(child_id)
 }
 
@@ -403,7 +403,7 @@ pub(crate) fn wait4_step(pid: isize) -> WaitResult {
             let _ = found;
             // 回收：drop space/kstack（Box 释放），槽位置空。
             sched.tasks[child_id] = None;
-            crate::log_info!("[wait] reaped task {} code {} (frames={})", child_id, exit_code, crate::kernel::mm::frame_allocator::allocated_count());
+            crate::log_info!("[wait] reaped task {} code {}  (frames={} wm={})", child_id, exit_code, crate::kernel::mm::frame_allocator::allocated_count(), crate::kernel::mm::frame_allocator::bump_watermark());
             WaitResult::Reaped { pid: child_id, exit_code }
         }
         Some(_) => WaitResult::WouldBlock,
