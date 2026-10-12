@@ -13,9 +13,15 @@ pub const SYSCALL_EXIT: usize = 93;
 pub const SYSCALL_FORK: usize = 220;
 pub const SYSCALL_WAIT4: usize = 260;
 pub const SYSCALL_EXECVE: usize = 221;
+pub const SYSCALL_DUP: usize = 23;
+pub const SYSCALL_OPENAT: usize = 56;
+pub const SYSCALL_CLOSE: usize = 57;
+pub const SYSCALL_READ: usize = 63;
 
 #[cfg(feature = "arch-riscv64")]
 mod exec;
+#[cfg(feature = "arch-riscv64")]
+mod fd;
 mod power;
 
 #[cfg(feature = "arch-riscv64")]
@@ -39,7 +45,16 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
     match syscall_id {
         // Linux reboot(2) ABI：a0=magic1, a1=magic2, a2=cmd, a3=arg
         SYSCALL_REBOOT => sys_reboot(args[0] as u32, args[1] as u32, args[2] as u32, args[3]),
-        SYSCALL_WRITE => sys_write(args[0], args[1], args[2]),
+        #[cfg(feature = "arch-riscv64")]
+        SYSCALL_WRITE => fd::sys_write(args[0], args[1], args[2]),
+        #[cfg(feature = "arch-riscv64")]
+        SYSCALL_READ => fd::sys_read(args[0], args[1], args[2]),
+        #[cfg(feature = "arch-riscv64")]
+        SYSCALL_CLOSE => fd::sys_close(args[0]),
+        #[cfg(feature = "arch-riscv64")]
+        SYSCALL_OPENAT => fd::sys_openat(args[0], args[1], args[2]),
+        #[cfg(feature = "arch-riscv64")]
+        SYSCALL_DUP => fd::sys_dup(args[0]),
         // exit/fork/wait4 依赖 task 模块（RV 用户态调度）；LA 用户态未实现，回落 ENOSYS。
         #[cfg(feature = "arch-riscv64")]
         SYSCALL_EXIT => crate::kernel::task::exit_current(args[0] as i32),
@@ -73,21 +88,20 @@ pub(crate) fn copy_from_user(src: usize, len: usize) -> Result<&'static [u8], is
     Ok(unsafe { core::slice::from_raw_parts(src as *const u8, len) })
 }
 
-/// write(fd, buf, len)：仅支持 fd=1（控制台输出），直接逐字节写不缓冲。
-fn sys_write(fd: usize, buf: usize, len: usize) -> isize {
-    if fd != 1 {
-        return EBADF;
-    }
-    let data = match copy_from_user(buf, len) {
-        Ok(data) => data,
-        Err(error) => return error,
-    };
-    if !data.is_empty() {
-        crate::arch::console::kernel_arch_console_write(data.as_ptr(), data.len());
-    }
-    len as isize
+/// 从用户内存拷一个 null 终止字符串（有界）。
+///
+/// 不能一次拷满 max_len：字符串可能位于用户栈顶附近，src+max_len 会越出
+/// USER_STACK_TOP（G5 F1 实机发现）。按「可用区间 = min(max_len, STACK_TOP-src)」
+/// 一次段校验；区间内无 null 视为超长 → EFAULT。
+pub(crate) fn copy_cstring_from_user(
+    src: usize,
+    max_len: usize,
+) -> Result<alloc::vec::Vec<u8>, isize> {
+    let avail = USER_STACK_TOP.saturating_sub(src).min(max_len);
+    let buf = copy_from_user(src, avail)?;
+    let end = buf.iter().position(|&b| b == 0).ok_or(EFAULT)?;
+    Ok(buf[..end].to_vec())
 }
-
 /// 向用户内存写一个 usize（wait status 等）。段边界校验同 copy_from_user；
 /// SUM=1 处理期内核可直接写用户页。
 fn copy_to_user(dst: usize, value: usize) -> Result<(), isize> {

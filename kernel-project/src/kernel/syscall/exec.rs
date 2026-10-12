@@ -8,7 +8,6 @@ use alloc::vec::Vec;
 
 use crate::arch;
 use crate::kernel::elf;
-use crate::kernel::fs::programs;
 use crate::kernel::mm::address::{AddressRange, VirtAddr};
 use crate::kernel::mm::memory_set::MemorySet;
 use crate::kernel::syscall::copy_from_user;
@@ -27,13 +26,6 @@ const EFAULT: isize = -14;
 const ENOMEM: isize = -12;
 const E2BIG: isize = -7;
 
-/// 从用户内存拷一个 null 终止字符串（有界，一次段校验 + 找 null）。
-fn copy_cstring_from_user(src: usize, max_len: usize) -> Result<Vec<u8>, isize> {
-    let buf = copy_from_user(src, max_len)?;
-    let end = buf.iter().position(|&b| b == 0).ok_or(EFAULT)?;
-    Ok(buf[..end].to_vec())
-}
-
 /// 读用户 argv 指针数组（NULL 结尾），逐项拷贝字符串到内核缓冲。
 fn copy_user_argv(argv_ptr: usize) -> Result<Vec<Vec<u8>>, isize> {
     let mut args = Vec::new();
@@ -43,7 +35,7 @@ fn copy_user_argv(argv_ptr: usize) -> Result<Vec<Vec<u8>>, isize> {
         if p == 0 {
             return Ok(args);
         }
-        args.push(copy_cstring_from_user(p, MAX_ARG_LEN)?);
+        args.push(super::copy_cstring_from_user(p, MAX_ARG_LEN)?);
     }
     Err(E2BIG)
 }
@@ -97,10 +89,11 @@ fn build_user_argv_stack(
 /// 成功时重写当前 TrapContext 为新程序现场并切到新地址空间，返回 Ok(())；
 /// 失败返回 Err(errno)，旧进程（地址空间与现场）原样保留。
 pub fn sys_execve(context: &mut arch::trap::TrapContext, args: [usize; 6]) -> Result<(), isize> {
-    let path_bytes = copy_cstring_from_user(args[0], MAX_PATH_LEN)?;
-    let path = core::str::from_utf8(&path_bytes).map_err(|_| -ENOENT)?;
-    let elf_bytes = programs::lookup(path).ok_or(ENOENT)?;
-    let elf = elf::parse(elf_bytes).map_err(|_| ENOEXEC)?;
+    let path_bytes = super::copy_cstring_from_user(args[0], MAX_PATH_LEN)?;
+    let path = core::str::from_utf8(&path_bytes).map_err(|_| ENOENT)?;
+    // G5：程序源权威迁至 ramfs（boot 时从 programs 表装载）。
+    let elf_bytes = crate::kernel::fs::ramfs::read_file_by_path(path)?;
+    let elf = elf::parse(&elf_bytes).map_err(|_| ENOEXEC)?;
 
     // 用户参数：argv 数组（args[1]）；envp（args[2]）忽略。
     let argv = if args[1] == 0 {
@@ -124,7 +117,7 @@ pub fn sys_execve(context: &mut arch::trap::TrapContext, args: [usize; 6]) -> Re
         MemorySet::new_user(layout, VirtAddr::new(memory_end), &elf.segments, user_stack)
             .map_err(|_| ENOMEM)?;
     space
-        .load_elf(&elf.segments, elf_bytes)
+        .load_elf(&elf.segments, &elf_bytes)
         .map_err(|_| ENOMEM)?;
 
     // 在新栈上构建 argv；失败同样保留旧进程。

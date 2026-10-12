@@ -111,6 +111,8 @@ pub(crate) struct TaskControlBlock {
     pub kstack: KernelStack,
     /// 内核态切换现场（`__switch` 保存/恢复）。
     pub task_ctx: arch::task::TaskContext,
+    /// 进程 FD 表（V2 §9：open/dup/close 的唯一入口；fork 整表复制共享偏移）。
+    pub fds: crate::kernel::fs::file::FdTable,
 }
 
 /// 全局调度状态。并发前提见模块头。
@@ -193,6 +195,7 @@ pub(crate) fn create_task(
         space: Box::new(space),
         kstack,
         task_ctx,
+        fds: crate::kernel::fs::file::FdTable::new(),
     })
 }
 
@@ -298,6 +301,7 @@ pub(crate) fn exec_replace_space(new_space: MemorySet) {
 /// RV 启动单任务（M3）：T0 直进用户态，由 uapp 自行 fork 建立父子关系。
 pub(crate) fn boot_tasks() -> ! {
     crate::arch::timer::init();
+    crate::kernel::fs::init();
     #[cfg(feature = "uapp-fault-test")]
     const UAPP_ELF: &[u8] = include_bytes!("../../../build/user/uapp_fault.elf");
     #[cfg(not(feature = "uapp-fault-test"))]
@@ -314,6 +318,20 @@ pub(crate) fn boot_tasks() -> ! {
     arch::trap::restore_from(ctx)
 }
 
+/// 以显式闭包访问当前任务的 FD 表（V2 §3：fs/syscall 不读取 Task 私有字段）。
+/// 闭包内不得再取 SCHED 锁（锁已在持有中）。
+pub(crate) fn with_current_fds<R>(f: impl FnOnce(&mut crate::kernel::fs::file::FdTable) -> R) -> R {
+    let mut sched = SCHED.lock();
+    let current = sched.current;
+    let t = sched.tasks[current].as_mut().expect("current task missing");
+    f(&mut t.fds)
+}
+
+/// 当前任务 id（日志/诊断用）。
+pub(crate) fn current_pid() -> usize {
+    let sched = SCHED.lock();
+    sched.current
+}
 /// wait4 单步检查结果。
 pub(crate) enum WaitResult {
     /// 子已退出并完成回收（槽已释放，调用方不得再引用）。
@@ -367,6 +385,11 @@ pub(crate) fn fork_current() -> Result<usize, isize> {
         (kstack, task_ctx)
     };
 
+    // 复制 FD 表：File 项 Arc clone → 父子共享同一打开文件描述（共享偏移）。
+    let child_fds = {
+        let parent = sched.tasks[current].as_ref().unwrap();
+        parent.fds.clone()
+    };
     let child_tcb = TaskControlBlock {
         id: 0,
         parent: Some(current),
@@ -375,6 +398,7 @@ pub(crate) fn fork_current() -> Result<usize, isize> {
         space: Box::new(new_space),
         kstack,
         task_ctx,
+        fds: child_fds,
     };
     let child_id = sched.push(child_tcb);
     sched.ready.push_back(child_id);
