@@ -38,7 +38,7 @@ $(error 编排错误：配置/清理目标不能与构建目标同条命令。�
 endif
 endif
 
-DEFAULT_PHONY := all defconfig alldefconfig menuconfig check build run gdb test fmt fmt-check clean user user-fault build-fault test-fault
+DEFAULT_PHONY := all defconfig alldefconfig menuconfig check build run gdb test fmt fmt-check clean user user-fault build-fault test-fault run-shell build-shell
 .PHONY: $(DEFAULT_PHONY)
 
 all:
@@ -115,8 +115,20 @@ build-fault: user-fault
 	@echo "产物：$(KERNEL_ELF)（uapp-fault-test 模式）"
 
 # 验收：用户态访问内核保护区 → fatal trap 受控停机（from_user=true）。
+# G0 起统一走有界运行器（V2 §11），不再用裸 run-test.sh。
 test-fault: build-fault
-	@bash scripts/run-test.sh "$(QEMU_BIN)" "$(QEMU_FLAGS)" "fatal trap: reason=.*from_user=true" "W2 内核保护区访问受控"
+	$(PYTHON) tools/run_qemu.py --qemu $(QEMU_BIN) --flags "$(QEMU_FLAGS)" --arch $(ARCH) \
+		--mode boot --timeout 60 --pattern "fatal trap: reason=.*from_user=true" \
+		--run-id fault-$(RUN_ID)
+
+# G0 统一运行入口（V2 §11）：有界运行器 + result.json。boot 默认 20s 预算、
+# 期望 M1 标记；内核启动后停驻（parking），MATCHED 即 PASS。
+# 详细原因读 artifacts/runs/<run-id>/result.json，make 只承诺 0/非 0。
+RUN_ID ?= $(shell date +%Y%m%d-%H%M%S)
+
+test: build
+	$(PYTHON) tools/run_qemu.py --qemu $(QEMU_BIN) --flags "$(QEMU_FLAGS)" --arch $(ARCH) \
+		--mode boot --run-id $(RUN_ID)
 
 # G5 小 shell 演示：与 build 同构，但 kernel 侧多开 uapp-shell feature（task0 = shell.elf）。
 build-shell: user
@@ -143,13 +155,6 @@ gdb: build
 	@command -v $(QEMU_BIN) >/dev/null 2>&1 || \
 		{ echo "未找到 $(QEMU_BIN)。请安装 QEMU（>=8.0）并加入 PATH 后再运行 make gdb。"; exit 1; }
 	$(QEMU_BIN) $(QEMU_FLAGS) -S -s
-
-## 测试 ----------------------------------------------------------------------
-# 最小运行测试入口（docs/10 §1，2026-10-12 规划书 W1 第 6 项）：
-# 在当前已配置架构上启动 QEMU，检查 M1 启动标记，带超时、退出码与原始日志
-# （日志 build/test-<arch>.log）。依赖 QEMU 与 bash（本项目开发环境 = WSL，见 docs/07）。
-test: build
-	@bash scripts/run-test.sh "$(QEMU_BIN)" "$(QEMU_FLAGS)"
 
 ## 格式与清理 ----------------------------------------------------------------
 

@@ -11,6 +11,11 @@
 | 性能基准 | fork/syscall 延迟/fs 吞吐/BuildStorm | 专用机/长跑 | 证据记录 |
 | 实板验证 | VF2 / 2K1000 | 实机 | M4 阶段 |
 
+统一运行入口为 `tools/run_qemu.py`（V2 §11 有界运行器）：`make test`
+（boot 冒烟）与 `make test-fault` 均经其执行；日志与判定见
+`artifacts/runs/<run-id>/`（serial.log / qemu.stderr.log / result.json），
+make 只承诺 0/非 0，详细原因读 result.json。
+
 ## 2. 内核自检（KUnit 式）约定
 
 - 测试挂在与被测语义相同的模块末尾（feature 门控的内联测试模块），不默认新建全局测试文件。
