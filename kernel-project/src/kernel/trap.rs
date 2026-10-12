@@ -59,11 +59,12 @@ fn handle_user_syscall(context: &mut crate::arch::TrapContext) {
 
 fn fatal_trap(context: &crate::arch::TrapContext, cause: TrapCause, reason: &'static str) -> ! {
     crate::log_error!(
-        "fatal trap: reason={} cause={:?} pc={:#x} bad_addr={:#x} from_user={}",
+        "fatal trap: reason={} cause={:?} pc={:#x} bad_addr={:#x} sp={:#x} from_user={}",
         reason,
         cause,
         context.pc(),
         context.bad_address(),
+        context.sp(),
         context.is_from_user(),
     );
 

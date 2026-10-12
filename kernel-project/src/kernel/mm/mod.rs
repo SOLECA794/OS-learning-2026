@@ -75,7 +75,7 @@ pub(crate) fn init() {
 }
 
 /// 解析构建配置中的 QEMU RAM MiB 数并转换为字节。
-fn configured_memory_bytes() -> usize {
+pub(crate) fn configured_memory_bytes() -> usize {
     let mut megabytes = 0usize;
     for byte in env!("KERNEL_MEMORY_MB").bytes() {
         assert!(byte.is_ascii_digit(), "KERNEL_MEMORY_MB must be decimal");

@@ -102,7 +102,13 @@ pub fn main(hartid: usize, dtb_pa: usize) -> ! {
 /// 流程：ELF 解析 → 用户 MemorySet（内核映射+用户段+用户栈）→ 拷段内容 →
 /// 激活用户页表 → 内核栈顶放置 TrapContext → sscratch=栈顶 → restore 进 U 模式。
 fn init_user() -> ! {
-    let uapp: &[u8] = include_bytes!("../../build/user/uapp.elf");
+    // 默认内嵌 uapp.elf；`make test-fault` 时经 feature 切换为 uapp_fault.elf
+    // （用户态访问内核保护区的独立测试程序，见 W2 附加用例 change record）。
+    #[cfg(feature = "uapp-fault-test")]
+    const UAPP_ELF: &[u8] = include_bytes!("../../build/user/uapp_fault.elf");
+    #[cfg(not(feature = "uapp-fault-test"))]
+    const UAPP_ELF: &[u8] = include_bytes!("../../build/user/uapp.elf");
+    let uapp: &[u8] = UAPP_ELF;
     let elf = crate::kernel::elf::parse(uapp).expect("uapp ELF parse failed");
 
     let layout = mm::kernel_space::KernelImageLayout::current();

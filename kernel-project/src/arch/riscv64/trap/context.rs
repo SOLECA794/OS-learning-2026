@@ -42,6 +42,10 @@ impl TrapContext {
     pub const fn pc(&self) -> usize {
         self.sepc
     }
+    /// trap 现场保存的栈指针（x2 槽）。
+    pub const fn sp(&self) -> usize {
+        self.registers[2]
+    }
     pub const fn bad_address(&self) -> usize {
         self.stval
     }

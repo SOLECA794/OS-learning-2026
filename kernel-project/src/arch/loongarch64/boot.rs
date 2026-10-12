@@ -28,9 +28,9 @@ _start:
     la    $r14, __boot_stack_bottom
     # 每核栈顶 = bottom + (core+1)*8192。用移位代替乘法（8K = 2^13）：
     # LLVM 对 global_asm 只启用基础指令集（与 Rust 生成代码的检查不一致）。
-    slli.d $r17, $r12, 13       # r17 = core * 8192
+    slli.d $r17, $r12, 16       # r17 = core * 65536
     add.d $r18, $r14, $r17
-    li.d  $r15, 8192            # BOOT_STACK_SIZE（每核 8K）
+    li.d  $r15, 65536           # BOOT_STACK_SIZE（每核 64K）
     add.d $r3, $r18, $r15       # sp = bottom + (core+1)*size = 该核栈顶
 
     # BSS 清零由主核在 kernel_main 内完成（先经 .data 的 BOOT_LOCK 选主再清，

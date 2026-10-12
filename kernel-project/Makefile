@@ -38,7 +38,7 @@ $(error 编排错误：配置/清理目标不能与构建目标同条命令。�
 endif
 endif
 
-DEFAULT_PHONY := all defconfig alldefconfig menuconfig check build run gdb test fmt fmt-check clean user
+DEFAULT_PHONY := all defconfig alldefconfig menuconfig check build run gdb test fmt fmt-check clean user user-fault build-fault test-fault
 .PHONY: $(DEFAULT_PHONY)
 
 all:
@@ -89,6 +89,28 @@ user:
 	RUSTFLAGS="$(USER_RUSTFLAGS)" $(CARGO) build --release --manifest-path user/Cargo.toml --target $(USER_TARGET)
 	@cp user/target/riscv64gc-unknown-none-elf/release/uapp $(USER_ELF)
 	@echo "用户程序：$(USER_ELF)"
+
+## W2 附加用例：fault 模式用户程序（make test-fault 专用）--------------------------
+
+USER_FAULT_ELF := build/user/uapp_fault.elf
+
+user-fault:
+	@mkdir -p build/user
+	RUSTFLAGS="$(USER_RUSTFLAGS)" $(CARGO) build --release --manifest-path user/Cargo.toml --target $(USER_TARGET) --features fault-test
+	@cp user/target/riscv64gc-unknown-none-elf/release/uapp $(USER_FAULT_ELF)
+	@echo "fault 模式用户程序：$(USER_FAULT_ELF)"
+
+# 与 build 目标同构，但 kernel 侧多开 uapp-fault-test feature：内嵌 uapp_fault.elf。
+build-fault: user-fault
+	@mkdir -p $(BUILD_DIR)
+	$(CARGO) build --target $(RUST_TARGET) --features $(RUST_FEATURES),uapp-fault-test $(CARGO_PROFILE_FLAG)
+	@cp $(CARGO_OUT_DIR)/$(KERNEL_NAME) $(KERNEL_ELF)
+	@$(PYTHON) tools/check-image.py $(KERNEL_ELF) $(LINK_BASE) $(ARCH)
+	@echo "产物：$(KERNEL_ELF)（uapp-fault-test 模式）"
+
+# 验收：用户态访问内核保护区 → fatal trap 受控停机（from_user=true）。
+test-fault: build-fault
+	@bash scripts/run-test.sh "$(QEMU_BIN)" "$(QEMU_FLAGS)" "fatal trap: reason=.*from_user=true" "W2 内核保护区访问受控"
 
 ## 运行（注意：会真正启动 QEMU，仅在用户明确要求时使用）------------------------
 

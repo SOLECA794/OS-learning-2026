@@ -4,5 +4,10 @@ version = "0.1.0"
 edition = "2021"
 publish = false
 
+# fault-test：W2 附加用例②（用户态访问内核保护区）的独立入口，
+# 由 Makefile `make user-fault` 显式开启，产物为 build/user/uapp_fault.elf。
+[features]
+fault-test = []
+
 [profile.release]
 panic = "abort"

@@ -1,11 +1,13 @@
 #!/usr/bin/env bash
 # 最小运行测试入口（docs/10 §1，2026-10-12 规划书 W1 第 6 项）：
 # 在当前已配置架构上启动 QEMU，检查 M1 标记，超时 + 退出码 + 原始日志。
-# 用法：bash scripts/run-test.sh "<qemu-bin>" "<qemu-flags>"
-# 退出码：0 = 日志检测到 M1 标记；1 = 未检测到或 QEMU 不可用。
+# 用法：bash scripts/run-test.sh "<qemu-bin>" "<qemu-flags>" ["<grep-pattern>" "<pass-label>"]
+# 退出码：0 = 日志检测到 pattern（默认 M1 标记）；1 = 未检测到或 QEMU 不可用。
 set -u
 QEMU_BIN="$1"
 QEMU_FLAGS="$2"
+PATTERN="${3:-M1 paging/trap foundation OK}"
+LABEL="${4:-M1 标记}"
 ARCH_VAL="${ARCH:-unknown}"
 LOG="build/test-${ARCH_VAL}.log"
 
@@ -19,10 +21,10 @@ mkdir -p build
 timeout 60 "$QEMU_BIN" $QEMU_FLAGS > "$LOG" 2>&1
 rc=$?
 
-if grep -q "M1 paging/trap foundation OK" "$LOG"; then
-  echo "PASS: $ARCH_VAL 启动至 M1 标记（日志 build/test-$ARCH_VAL.log，qemu rc=$rc）"
+if grep -q "$PATTERN" "$LOG"; then
+  echo "PASS: $ARCH_VAL $LABEL（日志 build/test-$ARCH_VAL.log，qemu rc=$rc）"
   exit 0
 fi
-echo "FAIL: 日志 build/test-$ARCH_VAL.log 无 M1 标记（qemu rc=$rc）。末尾 20 行："
+echo "FAIL: 日志 build/test-$ARCH_VAL.log 无 '$PATTERN'（qemu rc=$rc）。末尾 20 行："
 tail -20 "$LOG"
 exit 1

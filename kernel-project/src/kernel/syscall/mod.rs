@@ -55,7 +55,7 @@ fn copy_from_user(src: usize, len: usize) -> Result<&'static [u8], isize> {
 /// write(fd, buf, len)：仅支持 fd=1（控制台输出），直接逐字节写不缓冲。
 fn sys_write(fd: usize, buf: usize, len: usize) -> isize {
     if fd != 1 {
-        return -EBADF;
+        return EBADF;
     }
     let data = match copy_from_user(buf, len) {
         Ok(data) => data,

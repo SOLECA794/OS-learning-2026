@@ -25,9 +25,9 @@ _start:
     # 每核栈顶 = bottom + (hartid+1)*8192。用移位代替乘法（8K = 2^13）：
     # LLVM 对 global_asm 只启用基础指令集，mul（Zmmul）/amo（Zaamo）都会被拒，
     # 即使 target 实际支持（与 Rust 生成代码的检查不一致）。
-    slli t4, a0, 13             # t4 = hartid * 8192
+    slli t4, a0, 16             # t4 = hartid * 65536
     add t5, t2, t4
-    li t3, 8192                 # BOOT_STACK_SIZE（每核 8K）
+    li t3, 65536                # BOOT_STACK_SIZE（每核 64K）
     add sp, t5, t3              # sp = bottom + (hartid+1)*size = 该核栈顶
 
     # BSS 清零由主核在 kernel_main 内完成：先经 .data 的 BOOT_LOCK 选主、
