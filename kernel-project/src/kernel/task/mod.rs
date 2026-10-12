@@ -77,7 +77,9 @@ impl<T> core::ops::DerefMut for SpinLockGuard<'_, T> {
 
 impl<T> Drop for SpinLockGuard<'_, T> {
     fn drop(&mut self) {
-        self.lock.locked.store(false, core::sync::atomic::Ordering::Release);
+        self.lock
+            .locked
+            .store(false, core::sync::atomic::Ordering::Release);
     }
 }
 
@@ -145,11 +147,14 @@ impl Scheduler {
 const USER_STACK_TOP: usize = 0x7f00_0000;
 
 /// 从 ELF 构建一个用户任务：独立地址空间 + 内核栈 + 栈顶 TrapContext + 首次切换现场。
-pub(crate) fn create_task(elf: &crate::kernel::elf::Elf, uapp: &[u8]) -> Result<TaskControlBlock, ()> {
+pub(crate) fn create_task(
+    elf: &crate::kernel::elf::Elf,
+    uapp: &[u8],
+) -> Result<TaskControlBlock, ()> {
     let layout = crate::kernel::mm::kernel_space::KernelImageLayout::current();
     let memory_bytes = crate::kernel::mm::configured_memory_bytes();
-    let (_, memory_end) = arch::mm::physical_memory_range(memory_bytes)
-        .expect("configured memory range unavailable");
+    let (_, memory_end) =
+        arch::mm::physical_memory_range(memory_bytes).expect("configured memory range unavailable");
 
     let user_stack = AddressRange::new(
         VirtAddr::new(USER_STACK_TOP - 0x1000),
@@ -157,8 +162,9 @@ pub(crate) fn create_task(elf: &crate::kernel::elf::Elf, uapp: &[u8]) -> Result<
     )
     .expect("user stack range");
 
-    let mut space = MemorySet::new_user(layout, VirtAddr::new(memory_end), &elf.segments, user_stack)
-        .map_err(|_| ())?;
+    let mut space =
+        MemorySet::new_user(layout, VirtAddr::new(memory_end), &elf.segments, user_stack)
+            .map_err(|_| ())?;
     space.load_elf(&elf.segments, uapp).map_err(|_| ())?;
 
     let kstack = KernelStack::new().map_err(|_| ())?;
@@ -244,7 +250,9 @@ pub(crate) fn schedule() {
         }
         // 两槽互异且均被占用，Box 地址稳定（Vec 重排不影响）。
         let old_ptr: *mut arch::task::TaskContext = {
-            let t = sched.tasks[current].as_mut().expect("current slot occupied");
+            let t = sched.tasks[current]
+                .as_mut()
+                .expect("current slot occupied");
             &mut t.task_ctx
         };
         let new_ptr: *mut arch::task::TaskContext = {
@@ -265,11 +273,28 @@ pub(crate) fn schedule() {
     // 切回本任务（重新获得 CPU）：恢复自己的页表（当前 satp 仍是对方页表）。
     let my_ppn = {
         let sched = SCHED.lock();
-        sched.tasks[sched.current].as_ref().unwrap().space.root_ppn().value()
+        sched.tasks[sched.current]
+            .as_ref()
+            .unwrap()
+            .space
+            .root_ppn()
+            .value()
     };
     unsafe { arch::mm::activate(my_ppn) };
 }
 
+/// exec：把当前任务的地址空间一次性替换为新空间（G4）。
+///
+/// 调用方必须先 activate(new_space.root_ppn()) 再调用本函数——旧空间被 drop
+/// （释放页表树与用户页）时硬件必须已切换，避免释放仍被 satp 引用的页表。
+pub(crate) fn exec_replace_space(new_space: MemorySet) {
+    let mut sched = SCHED.lock();
+    let current = sched.current;
+    sched.tasks[current]
+        .as_mut()
+        .expect("current task missing during exec")
+        .space = Box::new(new_space);
+}
 /// RV 启动单任务（M3）：T0 直进用户态，由 uapp 自行 fork 建立父子关系。
 pub(crate) fn boot_tasks() -> ! {
     crate::arch::timer::init();
@@ -353,7 +378,13 @@ pub(crate) fn fork_current() -> Result<usize, isize> {
     };
     let child_id = sched.push(child_tcb);
     sched.ready.push_back(child_id);
-    crate::log_info!("[fork] task {} forked task {}  (frames={} wm={})", current, child_id, crate::kernel::mm::frame_allocator::allocated_count(), crate::kernel::mm::frame_allocator::bump_watermark());
+    crate::log_info!(
+        "[fork] task {} forked task {}  (frames={} wm={})",
+        current,
+        child_id,
+        crate::kernel::mm::frame_allocator::allocated_count(),
+        crate::kernel::mm::frame_allocator::bump_watermark()
+    );
     Ok(child_id)
 }
 
@@ -392,9 +423,9 @@ pub(crate) fn wait4_step(pid: isize) -> WaitResult {
     let current = sched.current;
     let found = sched.tasks.iter().enumerate().find(|(id, slot)| {
         *id != current
-            && slot
-                .as_ref()
-                .map_or(false, |t| t.parent == Some(current) && (pid < 0 || *id as isize == pid))
+            && slot.as_ref().map_or(false, |t| {
+                t.parent == Some(current) && (pid < 0 || *id as isize == pid)
+            })
     });
     match found {
         Some((child_id, Some(tcb))) if tcb.state == TaskState::Exited => {
@@ -403,8 +434,17 @@ pub(crate) fn wait4_step(pid: isize) -> WaitResult {
             let _ = found;
             // 回收：drop space/kstack（Box 释放），槽位置空。
             sched.tasks[child_id] = None;
-            crate::log_info!("[wait] reaped task {} code {}  (frames={} wm={})", child_id, exit_code, crate::kernel::mm::frame_allocator::allocated_count(), crate::kernel::mm::frame_allocator::bump_watermark());
-            WaitResult::Reaped { pid: child_id, exit_code }
+            crate::log_info!(
+                "[wait] reaped task {} code {}  (frames={} wm={})",
+                child_id,
+                exit_code,
+                crate::kernel::mm::frame_allocator::allocated_count(),
+                crate::kernel::mm::frame_allocator::bump_watermark()
+            );
+            WaitResult::Reaped {
+                pid: child_id,
+                exit_code,
+            }
         }
         Some(_) => WaitResult::WouldBlock,
         None => WaitResult::NoChild,

@@ -12,9 +12,14 @@ pub const SYSCALL_WRITE: usize = 64;
 pub const SYSCALL_EXIT: usize = 93;
 pub const SYSCALL_FORK: usize = 220;
 pub const SYSCALL_WAIT4: usize = 260;
+pub const SYSCALL_EXECVE: usize = 221;
 
+#[cfg(feature = "arch-riscv64")]
+mod exec;
 mod power;
 
+#[cfg(feature = "arch-riscv64")]
+pub use exec::sys_execve;
 use power::sys_reboot;
 
 /// Linux errno。
@@ -56,7 +61,7 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
 /// 当前激活页表含用户段映射，且 trap 处理期间 sstatus.SUM=1（见 entry 汇编），
 /// 因此 S-mode 可直接解引用用户页。M1.5 以段边界校验为准（单任务、无 fork），
 /// M1.6 换为逐页 PTE 权限查询（boundary M1.5 §4 已登记）。
-fn copy_from_user(src: usize, len: usize) -> Result<&'static [u8], isize> {
+pub(crate) fn copy_from_user(src: usize, len: usize) -> Result<&'static [u8], isize> {
     if len == 0 {
         return Ok(&[]);
     }
@@ -86,7 +91,9 @@ fn sys_write(fd: usize, buf: usize, len: usize) -> isize {
 /// 向用户内存写一个 usize（wait status 等）。段边界校验同 copy_from_user；
 /// SUM=1 处理期内核可直接写用户页。
 fn copy_to_user(dst: usize, value: usize) -> Result<(), isize> {
-    let end = dst.checked_add(core::mem::size_of::<usize>()).ok_or(EFAULT)?;
+    let end = dst
+        .checked_add(core::mem::size_of::<usize>())
+        .ok_or(EFAULT)?;
     if dst < USER_TEXT_BASE || end > USER_STACK_TOP {
         return Err(EFAULT);
     }

@@ -84,6 +84,14 @@ impl TrapContext {
         ctx
     }
 
+    /// 构造带 argc/argv 的用户态入口上下文（exec 用）：新程序从 `_start(argc, argv)`
+    /// 以 C ABI 接收 a0/a1；sp 指向新用户栈（含 argv 字符串与指针数组）。
+    pub fn new_user_with_args(entry: usize, user_sp: usize, argc: usize, argv: usize) -> Self {
+        let mut ctx = Self::new_user(entry, user_sp);
+        ctx.registers[10] = argc;
+        ctx.registers[11] = argv;
+        ctx
+    }
     pub fn set_syscall_return(&mut self, value: isize) {
         self.registers[10] = value as usize;
     }

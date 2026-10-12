@@ -40,9 +40,7 @@ fn handle_trap(context: &mut crate::arch::TrapContext) {
             crate::arch::timer::set_next_trigger();
             crate::kernel::task::schedule();
         }
-        TrapCause::Interrupt { .. } => {
-            fatal_trap(context, cause, "unhandled interrupt")
-        }
+        TrapCause::Interrupt { .. } => fatal_trap(context, cause, "unhandled interrupt"),
         TrapCause::Breakpoint => {
             fatal_trap(context, cause, "breakpoint handling is not implemented")
         }
@@ -60,6 +58,18 @@ fn handle_user_syscall(context: &mut crate::arch::TrapContext) {
     // 否则可返回的系统调用会在 ertn/sret 后再次执行并形成无限 trap。
     // 先推进 PC 也保证 restart 这类 `-> !` 路径不依赖后续现场修改。
     context.advance_pc();
+    // exec 是唯一"成功不返回旧现场"的 syscall：成功后现场已被重写为新程序
+    // （entry/argc/argv/新栈），不得再写返回值（V2 §7 返回动作合同）。
+    #[cfg(feature = "arch-riscv64")]
+    if syscall_id == super::syscall::SYSCALL_EXECVE {
+        match super::syscall::sys_execve(context, args) {
+            Ok(()) => return,
+            Err(errno) => {
+                context.set_syscall_return(errno);
+                return;
+            }
+        }
+    }
     let result = super::syscall::syscall(syscall_id, args);
     context.set_syscall_return(result);
 }

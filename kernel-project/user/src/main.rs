@@ -10,6 +10,7 @@ const SYS_WRITE: usize = 64;
 const SYS_EXIT: usize = 93;
 const SYS_FORK: usize = 220;
 const SYS_WAIT4: usize = 260;
+const SYS_EXECVE: usize = 221;
 
 /// G1 连续页复用验收轮数：每轮 fork 一子并 wait 回收。
 /// 8 轮后内核侧帧计数应每轮对称（fork 后 / wait 后数值逐轮一致），
@@ -49,7 +50,39 @@ extern "C" fn _start() -> ! {
         syscall(SYS_WRITE, [1, b"R".as_ptr() as usize, 1, 0, 0, 0]);
     }
     syscall(SYS_WRITE, [1, b"PASS\n".as_ptr() as usize, 5, 0, 0, 0]);
-    syscall(SYS_EXIT, [0, 0, 0, 0, 0, 0]);
+
+    // ==== G4 exec 验收 ====
+    // ① 不存在路径 → -ENOENT(-2)，旧进程保留继续。
+    let bad_path = b"/nonexist\0";
+    let r1 = syscall(SYS_EXECVE, [bad_path.as_ptr() as usize, 0, 0, 0, 0, 0]);
+    if r1 != -2 {
+        syscall(SYS_WRITE, [1, b"E1_FAIL\n".as_ptr() as usize, 8, 0, 0, 0]);
+        syscall(SYS_EXIT, [1, 0, 0, 0, 0, 0]);
+        loop {}
+    }
+    syscall(SYS_WRITE, [1, b"E1".as_ptr() as usize, 2, 0, 0, 0]);
+
+    // ② 坏 ELF（/bad）→ -ENOEXEC(-8)，旧进程保留继续。
+    let bad_elf_path = b"/bad\0";
+    let r2 = syscall(SYS_EXECVE, [bad_elf_path.as_ptr() as usize, 0, 0, 0, 0, 0]);
+    if r2 != -8 {
+        syscall(SYS_WRITE, [1, b"E2_FAIL\n".as_ptr() as usize, 8, 0, 0, 0]);
+        syscall(SYS_EXIT, [1, 0, 0, 0, 0, 0]);
+        loop {}
+    }
+    syscall(SYS_WRITE, [1, b"E2".as_ptr() as usize, 2, 0, 0, 0]);
+
+    // ③ 成功 exec：/uapp2 带 argv；成功后现场被替换，本函数不应继续。
+    let path = b"/uapp2\0";
+    let arg1 = b"hello\0";
+    let argv = [path.as_ptr() as usize, arg1.as_ptr() as usize, 0usize];
+    syscall(
+        SYS_EXECVE,
+        [path.as_ptr() as usize, argv.as_ptr() as usize, 0, 0, 0, 0],
+    );
+    // 若到达：exec 未换现场（实现回归）。
+    syscall(SYS_WRITE, [1, b"EXEC_FAIL\n".as_ptr() as usize, 10, 0, 0, 0]);
+    syscall(SYS_EXIT, [1, 0, 0, 0, 0, 0]);
     loop {}
 }
 

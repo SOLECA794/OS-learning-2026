@@ -17,6 +17,8 @@
 static BOOT_LOCK: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
 
 pub(crate) mod elf;
+#[cfg(feature = "arch-riscv64")]
+pub(crate) mod fs;
 pub(crate) mod mm;
 mod syscall;
 #[cfg(feature = "arch-riscv64")]

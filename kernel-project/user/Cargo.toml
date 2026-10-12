@@ -11,3 +11,6 @@ fault-test = []
 
 [profile.release]
 panic = "abort"
+[[bin]]
+name = "uapp2"
+path = "src/bin/uapp2.rs"

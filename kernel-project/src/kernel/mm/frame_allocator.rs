@@ -315,7 +315,11 @@ pub(super) unsafe fn deallocate(ppn: PhysPageNum) {
 /// 调用方必须证明该段不再被任何硬件页表或软件对象访问。
 pub(super) unsafe fn deallocate_block(start: PhysPageNum, pages: usize) {
     // SAFETY: 由调用方保证该段不再被任何映射或页表引用。
-    unsafe { FRAME_ALLOCATOR.lock().deallocate_range(start.value(), pages) }
+    unsafe {
+        FRAME_ALLOCATOR
+            .lock()
+            .deallocate_range(start.value(), pages)
+    }
 }
 
 /// 一个物理页帧的唯一所有权令牌。

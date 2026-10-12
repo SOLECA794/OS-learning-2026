@@ -47,7 +47,8 @@ impl TaskContext {
     }
 }
 
-global_asm!(r#"
+global_asm!(
+    r#"
     .section .text.trap, "ax"
     .balign 4
     .globl __riscv64_switch
@@ -81,7 +82,8 @@ __riscv64_switch:
     ld s10, 96(a1)
     ld s11, 104(a1)
     ret
-"#);
+"#
+);
 
 /// 保存当前现场到 `old`，恢复 `new` 现场并从 `new.ra` 继续执行。
 ///

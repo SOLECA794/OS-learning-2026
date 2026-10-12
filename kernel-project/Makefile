@@ -77,6 +77,8 @@ build: user
 ## 用户程序（M1.5：内核 include_bytes! 内嵌 uapp.elf，build/check 依赖本目标）-----
 
 USER_ELF := build/user/uapp.elf
+# G4：exec 目标程序（uapp2）随 user 目标一并构建并拷入 build/user。
+USER_ELF2 := build/user/uapp2.elf
 # user crate 的 .cargo/config.toml 不会被 --manifest-path 模式发现（cargo 从 CWD 找配置），
 # 因此 target 与链接脚本在此显式声明。
 # -T 必须用 $(CURDIR) 绝对路径：rustc 链接时工作目录会切到临时目录，相对路径找不到脚本。
@@ -88,7 +90,8 @@ user:
 	@mkdir -p build/user
 	RUSTFLAGS="$(USER_RUSTFLAGS)" $(CARGO) build --release --manifest-path user/Cargo.toml --target $(USER_TARGET)
 	@cp user/target/riscv64gc-unknown-none-elf/release/uapp $(USER_ELF)
-	@echo "用户程序：$(USER_ELF)"
+	@cp user/target/riscv64gc-unknown-none-elf/release/uapp2 $(USER_ELF2)
+	@echo "用户程序：$(USER_ELF) $(USER_ELF2)"
 
 ## W2 附加用例：fault 模式用户程序（make test-fault 专用）--------------------------
 
