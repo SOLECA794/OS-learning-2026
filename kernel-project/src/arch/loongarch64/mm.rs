@@ -67,6 +67,34 @@ impl PageTableEntry {
     pub const fn ppn(self) -> usize {
         (self.0 & PHYSICAL_ADDRESS_MASK) >> 12
     }
+
+    /// 把叶子 PTE 读回为公共权限与内存类型（LA 编码：W[8]、NR[61]、NX[62]、
+    /// PLV[3:2]、MAT[5:4]；V/D 位不反映到公共权限，COW 清写时 D 位随 leaf() 重写）。
+    pub fn permissions(self) -> PagePermissions {
+        PagePermissions {
+            read: self.0 & PTE_NO_READ == 0,
+            write: self.0 & PTE_WRITE != 0,
+            execute: self.0 & PTE_NO_EXECUTE == 0,
+            user: self.0 & PTE_PLV3 != 0,
+            memory_type: if self.0 & PTE_MAT_COHERENT != 0 {
+                super::super::MemoryType::Normal
+            } else {
+                super::super::MemoryType::Device
+            },
+        }
+    }
+}
+
+/// 刷新本核全部 TLB（PTE 修改后调用；不切换根页表）。
+pub fn flush_tlb() {
+    // SAFETY: invtlb 0x0,$r0,$r0 使本核全部 TLB 项失效，dbar 保证顺序，无其它副作用。
+    unsafe {
+        core::arch::asm!(
+            "invtlb 0x0, $r0, $r0",
+            "dbar 0",
+            options(nostack, preserves_flags)
+        );
+    }
 }
 
 /// QEMU 9.2.1 LoongArch virt 要求 ram_size >= 1 GiB 才能启动（M0 实测），

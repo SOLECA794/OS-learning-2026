@@ -3,7 +3,10 @@ target/
 build/
 **/*.rs.bk
 
-# 运行器日志（V2 §11）：make clean 不删除，保持独立目录\nartifacts/\n\n# QEMU / test images (large binaries, never commit)
+# 运行器日志（V2 §11）：make clean 不删除，保持独立目录
+artifacts/
+
+# QEMU / test images (large binaries, never commit)
 *.img
 *.img.gz
 *.sdcard

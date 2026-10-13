@@ -5,6 +5,7 @@
 //! 相邻块合并——连续区（内核栈、用户地址空间）在反复分配/释放后可复用，
 //! 不依赖 bump 游标无限前进。
 
+use alloc::collections::BTreeMap;
 use core::mem::ManuallyDrop;
 use core::ptr;
 
@@ -260,6 +261,11 @@ impl FrameAllocator {
 /// 串行化所有页帧状态转换，当前所有 CPU 共享同一个分配器。
 static FRAME_ALLOCATOR: SpinLock<FrameAllocator> = SpinLock::new(FrameAllocator::new());
 
+/// COW 共享页引用计数表：仅登记被 fork 共享的物理页（ppn → 引用数）。
+/// 未登记页视为独占（refcount=1，释放时直接归还）。引用数归零才真正
+/// deallocate，其余释放路径只减计数。
+static FRAME_REFS: SpinLock<BTreeMap<usize, usize>> = SpinLock::new(BTreeMap::new());
+
 /// 初始化全局页帧分配器管理的物理页范围。
 pub fn init(start: PhysPageNum, end: PhysPageNum) -> Result<(), FrameAllocError> {
     FRAME_ALLOCATOR.lock().init(start, end)
@@ -307,6 +313,42 @@ pub fn bump_watermark() -> usize {
 pub(super) unsafe fn deallocate(ppn: PhysPageNum) {
     // SAFETY: 由调用方保证该页不再被任何映射或页表引用。
     unsafe { FRAME_ALLOCATOR.lock().deallocate_range(ppn.value(), 1) }
+}
+
+/// 登记一次 COW 共享：某物理页被新增一个映射引用。
+///
+/// 未登记页首次进入共享时计数从 1（原独占者）跳到 2；此后每次 retain +1。
+/// 调用方必须保证该页当前已被某映射持有，且本调用对应一个新的共享映射。
+pub(crate) fn cow_retain(ppn: PhysPageNum) {
+    let mut refs = FRAME_REFS.lock();
+    *refs.entry(ppn.value()).or_insert(1) += 1;
+}
+
+/// COW 感知释放：释放调用方持有的一个映射引用。
+///
+/// - 登记页：计数 -1，归零则移除登记并真正归还给分配器；
+/// - 未登记页（独占）：与 deallocate 等价，直接归还。
+///
+/// # Safety
+/// 调用方必须证明自己确实持有一个指向该页的映射引用，且此后不再访问该映射。
+pub(super) unsafe fn deallocate_cow(ppn: PhysPageNum) {
+    let mut refs = FRAME_REFS.lock();
+    match refs.get_mut(&ppn.value()) {
+        Some(count) => {
+            *count -= 1;
+            if *count == 0 {
+                refs.remove(&ppn.value());
+                drop(refs);
+                // SAFETY: 计数归零意味着最后一个映射引用释放，页不再可达。
+                unsafe { deallocate(ppn) };
+            }
+        }
+        None => {
+            drop(refs);
+            // SAFETY: 独占页，调用方持有唯一引用。
+            unsafe { deallocate(ppn) };
+        }
+    }
 }
 
 /// 不经过 RAII 令牌直接归还一段连续页面，供内核栈等整块析构路径使用。

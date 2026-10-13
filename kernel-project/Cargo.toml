@@ -32,6 +32,7 @@ log-level-trace = []
 # 仅 `make test-fault` 使用，默认构建不开启。
 uapp-fault-test = []
 uapp-shell = []
+uapp-cow = []
 
 [profile.dev]
 panic = "abort"

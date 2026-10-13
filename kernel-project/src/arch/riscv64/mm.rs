@@ -56,6 +56,18 @@ impl PageTableEntry {
     pub const fn ppn(self) -> usize {
         self.0 >> 10
     }
+
+    /// 把叶子 PTE 读回为公共权限与内存类型（memory_type 未编码于 Sv39 PTE，
+    /// 恒为 Normal；内核设备区由 Identity 区域承载，不经过本路径）。
+    pub fn permissions(self) -> PagePermissions {
+        PagePermissions {
+            read: self.0 & PTE_READ != 0,
+            write: self.0 & PTE_WRITE != 0,
+            execute: self.0 & PTE_EXECUTE != 0,
+            user: self.0 & PTE_USER != 0,
+            memory_type: super::super::MemoryType::Normal,
+        }
+    }
 }
 
 /// 当前 QEMU virt 的连续 RAM 范围。
@@ -63,6 +75,14 @@ pub fn physical_memory_range(memory_bytes: usize) -> Option<(usize, usize)> {
     PHYS_MEMORY_BASE
         .checked_add(memory_bytes)
         .map(|end| (PHYS_MEMORY_BASE, end))
+}
+
+/// 刷新本 hart 全部翻译缓存（PTE 修改后调用；不切换根页表）。
+pub fn flush_tlb() {
+    // SAFETY: sfence.vma zero, zero 只丢弃本核全部 TLB 项，无其它副作用。
+    unsafe {
+        core::arch::asm!("sfence.vma zero, zero", options(nostack, preserves_flags));
+    }
 }
 
 /// 内核 Sv39 页表保持 RAM 身份映射，因此可直接访问页表页。

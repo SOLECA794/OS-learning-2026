@@ -30,7 +30,17 @@ fn handle_trap(context: &mut crate::arch::TrapContext) {
     match cause {
         TrapCause::UserSyscall if context.is_from_user() => handle_user_syscall(context),
         TrapCause::UserSyscall => fatal_trap(context, cause, "syscall did not come from user mode"),
-        TrapCause::InstructionPageFault | TrapCause::LoadPageFault | TrapCause::StorePageFault => {
+        // V2 G6：仅接管写时复制（COW）页的 store fault；其余缺页仍受控停机。
+        // LA 侧无 task 模块（COW 用户态尚未对齐），store fault 一律受控停机。
+        TrapCause::StorePageFault => {
+            #[cfg(feature = "arch-riscv64")]
+            if !handle_store_fault(context) {
+                fatal_trap(context, cause, "store fault outside COW pages")
+            }
+            #[cfg(not(feature = "arch-riscv64"))]
+            fatal_trap(context, cause, "page-fault handling is not implemented")
+        }
+        TrapCause::InstructionPageFault | TrapCause::LoadPageFault => {
             fatal_trap(context, cause, "page-fault handling is not implemented")
         }
         #[cfg(feature = "arch-riscv64")]
@@ -72,6 +82,18 @@ fn handle_user_syscall(context: &mut crate::arch::TrapContext) {
     }
     let result = super::syscall::syscall(syscall_id, args);
     context.set_syscall_return(result);
+}
+
+/// 处理用户/内核态对 COW 页的写访问：分配新页、拷贝、解除 COW、恢复写权限。
+/// 返回 true=已处理（sepc 不变，重新执行故障指令）；false=非 COW 页（调用方 fatal）。
+#[cfg(feature = "arch-riscv64")]
+fn handle_store_fault(context: &crate::arch::TrapContext) -> bool {
+    use crate::kernel::mm::address::VirtAddr;
+    let vpn = VirtAddr::new(context.bad_address()).floor();
+    match crate::kernel::task::with_current_space(|space| space.handle_cow_store(vpn)) {
+        Some(Ok(true)) => true,
+        _ => false,
+    }
 }
 
 fn fatal_trap(context: &crate::arch::TrapContext, cause: TrapCause, reason: &'static str) -> ! {

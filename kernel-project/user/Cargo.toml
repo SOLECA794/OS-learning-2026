@@ -17,3 +17,6 @@ path = "src/bin/uapp2.rs"
 [[bin]]
 name = "shell"
 path = "src/bin/shell.rs"
+[[bin]]
+name = "uapp-cow"
+path = "src/bin/uapp-cow.rs"

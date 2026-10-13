@@ -305,9 +305,24 @@ pub(crate) fn boot_tasks() -> ! {
     #[cfg(feature = "uapp-fault-test")]
     const UAPP_ELF: &[u8] = include_bytes!("../../../build/user/uapp_fault.elf");
     // G5 shell 演示模式（make run-shell）：task0 = shell.elf，跑固定输入脚本 /cmds.txt。
-    #[cfg(all(feature = "uapp-shell", not(feature = "uapp-fault-test")))]
+    #[cfg(all(
+        feature = "uapp-shell",
+        not(feature = "uapp-fault-test"),
+        not(feature = "uapp-cow")
+    ))]
     const UAPP_ELF: &[u8] = include_bytes!("../../../build/user/shell.elf");
-    #[cfg(all(not(feature = "uapp-shell"), not(feature = "uapp-fault-test")))]
+    // G6 COW 验收模式（make run-cow）：task0 = uapp-cow.elf，输出 C1–C5 断言。
+    #[cfg(all(
+        feature = "uapp-cow",
+        not(feature = "uapp-shell"),
+        not(feature = "uapp-fault-test")
+    ))]
+    const UAPP_ELF: &[u8] = include_bytes!("../../../build/user/uapp-cow.elf");
+    #[cfg(all(
+        not(feature = "uapp-shell"),
+        not(feature = "uapp-fault-test"),
+        not(feature = "uapp-cow")
+    ))]
     const UAPP_ELF: &[u8] = include_bytes!("../../../build/user/uapp.elf");
     let uapp: &[u8] = UAPP_ELF;
     let elf = crate::kernel::elf::parse(uapp).expect("uapp ELF parse failed");
@@ -335,6 +350,16 @@ pub(crate) fn current_pid() -> usize {
     let sched = SCHED.lock();
     sched.current
 }
+
+/// 持 SCHED 锁调用闭包访问当前任务地址空间（trap 缺页处理用）。
+/// 任务槽不存在时返回 None。
+pub(crate) fn with_current_space<R>(
+    f: impl FnOnce(&mut crate::kernel::mm::memory_set::MemorySet) -> R,
+) -> Option<R> {
+    let mut sched = SCHED.lock();
+    let current = sched.current;
+    sched.tasks[current].as_mut().map(|t| f(&mut t.space))
+}
 /// wait4 单步检查结果。
 pub(crate) enum WaitResult {
     /// 子已退出并完成回收（槽已释放，调用方不得再引用）。
@@ -345,10 +370,10 @@ pub(crate) enum WaitResult {
     NoChild,
 }
 
-/// fork：复制当前任务地址空间与现场，登记子任务并放入就绪队列，返回子任务 id。
+/// fork：写时复制（COW）当前任务地址空间并复制现场，登记子任务并放入就绪队列。
 ///
 /// 子进程从 fork 返回 0（现场 a0 改写、sepc 不变 → 从 fork 返回处继续）；父进程返回子 id。
-/// 普通复制（非 COW；COW 为 W7-8 条件增强项）。
+/// V2 G6：可写用户页经 `MemorySet::dup_cow` 变为双侧只读共享，写时触发缺页复制。
 pub(crate) fn fork_current() -> Result<usize, isize> {
     const ENOMEM: isize = -12;
     let layout = crate::kernel::mm::kernel_space::KernelImageLayout::current();
@@ -358,12 +383,12 @@ pub(crate) fn fork_current() -> Result<usize, isize> {
     let mut sched = SCHED.lock();
     let current = sched.current;
 
-    // 复制地址空间（借用父 TCB 的块结束后再 push 子任务，避免 &mut 冲突）。
+    // COW 复制地址空间：父可写页同步改为只读共享（需 &mut 父 space）。
     let new_space = {
-        let parent = sched.tasks[current].as_ref().unwrap();
+        let parent = sched.tasks[current].as_mut().unwrap();
         parent
             .space
-            .dup(layout, VirtAddr::new(memory_end))
+            .dup_cow(layout, VirtAddr::new(memory_end))
             .map_err(|_| ENOMEM)?
     };
 

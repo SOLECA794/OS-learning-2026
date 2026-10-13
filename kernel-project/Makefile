@@ -81,6 +81,8 @@ USER_ELF := build/user/uapp.elf
 USER_ELF2 := build/user/uapp2.elf
 # G5：小 shell（uapp-shell 模式 task0），随 user 目标一并构建。
 USER_SHELL_ELF := build/user/shell.elf
+# G6：COW 验收程序（uapp-cow 模式 task0）。
+USER_COW_ELF := build/user/uapp-cow.elf
 # user crate 的 .cargo/config.toml 不会被 --manifest-path 模式发现（cargo 从 CWD 找配置），
 # 因此 target 与链接脚本在此显式声明。
 # -T 必须用 $(CURDIR) 绝对路径：rustc 链接时工作目录会切到临时目录，相对路径找不到脚本。
@@ -94,6 +96,7 @@ user:
 	@cp user/target/riscv64gc-unknown-none-elf/release/uapp $(USER_ELF)
 	@cp user/target/riscv64gc-unknown-none-elf/release/uapp2 $(USER_ELF2)
 	@cp user/target/riscv64gc-unknown-none-elf/release/shell $(USER_SHELL_ELF)
+	@cp user/target/riscv64gc-unknown-none-elf/release/uapp-cow $(USER_COW_ELF)
 	@echo "用户程序：$(USER_ELF) $(USER_ELF2) $(USER_SHELL_ELF)"
 
 ## W2 附加用例：fault 模式用户程序（make test-fault 专用）--------------------------
@@ -137,6 +140,17 @@ build-shell: user
 	@cp $(CARGO_OUT_DIR)/$(KERNEL_NAME) $(KERNEL_ELF)
 	@$(PYTHON) tools/check-image.py $(KERNEL_ELF) $(LINK_BASE) $(ARCH)
 	@echo "产物：$(KERNEL_ELF)（uapp-shell 模式）"
+
+# G6 COW 验收：与 build 同构，但 kernel 侧多开 uapp-cow feature（task0 = uapp-cow.elf）。
+build-cow: user
+	@mkdir -p $(BUILD_DIR)
+	$(CARGO) build --target $(RUST_TARGET) --features $(RUST_FEATURES),uapp-cow $(CARGO_PROFILE_FLAG)
+	@cp $(CARGO_OUT_DIR)/$(KERNEL_NAME) $(KERNEL_ELF)
+	@$(PYTHON) tools/check-image.py $(KERNEL_ELF) $(LINK_BASE) $(ARCH)
+	@echo "产物：$(KERNEL_ELF)（uapp-cow 模式）"
+
+run-cow: build-cow
+	$(PYTHON) tools/run_qemu.py --qemu $(QEMU_BIN) --flags "$(QEMU_FLAGS)" --arch riscv64 --mode boot --timeout 60 --pattern "C5" --run-id $(RUN_ID) --elf $(KERNEL_ELF)
 
 # G5 shell 实机演示（V2 §9：固定输入脚本 /cmds.txt + ready 标记）。
 run-shell: build-shell

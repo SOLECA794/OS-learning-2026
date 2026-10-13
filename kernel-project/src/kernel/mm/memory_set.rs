@@ -1,5 +1,6 @@
 //! 映射区与地址空间所有权。
 
+use alloc::collections::BTreeSet;
 use alloc::vec::Vec;
 
 use super::address::{AddressError, AddressRange, PhysPageNum, VirtAddr, VirtPageNum, VpnRange};
@@ -140,8 +141,8 @@ impl MapArea {
         while vpn < end {
             if let Ok(ppn) = page_table.unmap(vpn) {
                 if self.map_type == MapType::Framed {
-                    // SAFETY: 该叶子映射刚被移除，数据页所有权回到本失败路径。
-                    unsafe { frame_allocator::deallocate(ppn) };
+                    // SAFETY: 该叶子映射刚被移除；COW 页走引用计数释放，独占页直接归还。
+                    unsafe { frame_allocator::deallocate_cow(ppn) };
                 }
             }
             vpn = vpn.checked_add(1).expect("rollback VPN overflow");
@@ -155,8 +156,8 @@ impl MapArea {
         while vpn < self.range.end() {
             match page_table.unmap(vpn) {
                 Ok(ppn) if self.map_type == MapType::Framed => {
-                    // SAFETY: 页表叶子已清除，且 framed 区域是该页唯一 owner。
-                    unsafe { frame_allocator::deallocate(ppn) };
+                    // SAFETY: 页表叶子已清除；COW 页按引用计数释放（可能仍有其它进程引用）。
+                    unsafe { frame_allocator::deallocate_cow(ppn) };
                 }
                 Ok(_) => {}
                 Err(error) if first_error.is_none() => first_error = Some(error),
@@ -174,6 +175,8 @@ impl MapArea {
 pub struct MemorySet {
     page_table: PageTable,
     areas: [Option<MapArea>; MAX_MAP_AREAS],
+    /// 处于 COW 共享状态的用户虚拟页（写时复制：PTE 已清写位，集合与 PTE 同域维护）。
+    cow_pages: BTreeSet<VirtPageNum>,
 }
 
 impl MemorySet {
@@ -182,6 +185,7 @@ impl MemorySet {
         Ok(Self {
             page_table: PageTable::new()?,
             areas: [None; MAX_MAP_AREAS],
+            cow_pages: BTreeSet::new(),
         })
     }
 
@@ -316,6 +320,99 @@ impl MemorySet {
         }
         Ok(new_set)
     }
+    /// 写时复制 fork：复用页表叶子的物理页，双侧（含父）改为只读 + COW 登记。
+    ///
+    /// - 可写叶：父 PTE 清写位并登记 COW，子 PTE 同（共享物理页），引用计数 +1；
+    /// - 已 COW 叶：子继续共享，引用计数 +1；
+    /// - 只读/可执行叶：直接共享 PTE，不登记（永不写，无需复制）；
+    /// - Identity 区域（内核映射）跳过，按参数重建。
+    /// 需要 &mut self：父地址空间的 PTE 也要改为 COW 只读。
+    pub fn dup_cow(
+        &mut self,
+        layout: KernelImageLayout,
+        physical_memory_end: VirtAddr,
+    ) -> Result<Self, MemoryError> {
+        let mut new_set = Self::new_bare()?;
+        new_set.insert_kernel_mapping(layout, physical_memory_end)?;
+        for area in self.areas.iter().flatten() {
+            if area.map_type != MapType::Framed {
+                continue;
+            }
+            let mut vpn = area.range.start();
+            while vpn < area.range.end() {
+                let (ppn, perms, memtype) = self
+                    .page_table
+                    .leaf_info(vpn)
+                    .ok_or(MemoryError::AreaNotFound)?;
+                let was_cow = self.cow_pages.contains(&vpn);
+                let child_perms = if perms.contains(MapPermission::WRITE) || was_cow {
+                    // 共享写页 → 双侧 COW：父/子 PTE 均清写位。
+                    if !was_cow {
+                        let ro = perms.without(MapPermission::WRITE);
+                        self.page_table.set_leaf_permissions(vpn, ro, memtype)?;
+                        self.cow_pages.insert(vpn);
+                    }
+                    frame_allocator::cow_retain(ppn);
+                    new_set.cow_pages.insert(vpn);
+                    perms.without(MapPermission::WRITE)
+                } else {
+                    perms
+                };
+                new_set
+                    .page_table
+                    .map(vpn, ppn, child_perms, memtype)
+                    .map_err(MemoryError::from)?;
+                vpn = vpn.checked_add(1)?;
+            }
+        }
+        Ok(new_set)
+    }
+
+    /// COW store fault 处理入口（trap 调用）：
+    /// vpn 在 COW 集合中则分配新页、拷贝、解除 COW 并恢复写权限、释放本进程对旧页的引用。
+    /// 返回 Ok(true) 表示已处理（恢复执行）；Ok(false) 表示非 COW 页（调用方走 fatal）。
+    pub(crate) fn handle_cow_store(&mut self, vpn: VirtPageNum) -> Result<bool, MemoryError> {
+        if !self.cow_pages.contains(&vpn) {
+            return Ok(false);
+        }
+        let (ppn, perms, memtype) = self
+            .page_table
+            .leaf_info(vpn)
+            .ok_or(MemoryError::AreaNotFound)?;
+        let new_frame = frame_allocator::allocate().map_err(MemoryError::from)?;
+        let dst_ppn = new_frame.ppn();
+        let src = (ppn.value() << super::address::PAGE_SHIFT) as *const u8;
+        let dst = (dst_ppn.value() << super::address::PAGE_SHIFT) as *mut u8;
+        // SAFETY: 旧页仍由本进程映射持有；新页由新 FrameTracker 独占；区间各为一页。
+        unsafe {
+            core::ptr::copy_nonoverlapping(src, dst, super::address::PAGE_SIZE);
+        }
+        let writable = perms.union(MapPermission::WRITE);
+        // 关键：必须同时把叶子指向新页并恢复写权限（仅改权限会让 PTE 指向
+        // 随后被释放的旧页，见 run-cow 实测 illegal instruction）。
+        self.page_table
+            .set_leaf(vpn, dst_ppn, writable, memtype)
+            .map_err(MemoryError::from)?;
+        self.cow_pages.remove(&vpn);
+        let _ = new_frame.into_ppn();
+        // SAFETY: 写者已切换到新页，释放对旧共享页的一个引用。
+        unsafe { frame_allocator::deallocate_cow(ppn) };
+        // 本核 PTE 已变化，刷新对应地址的翻译缓存。
+        crate::arch::mm::flush_tlb();
+        crate::log_info!(
+            "[cow] copy vpn={} old_ppn={} new_ppn={}",
+            vpn.value(),
+            ppn.value(),
+            dst_ppn.value()
+        );
+        Ok(true)
+    }
+
+    /// 查询虚拟页是否处于 COW 共享状态（trap 分发用）。
+    pub(crate) fn cow_contains(&self, vpn: VirtPageNum) -> bool {
+        self.cow_pages.contains(&vpn)
+    }
+
     /// 内核映像身份映射（代码/rodata/data/bss/boot 栈/空闲 RAM/必需 MMIO）。
     fn insert_kernel_mapping(
         &mut self,

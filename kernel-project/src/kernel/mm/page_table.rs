@@ -53,6 +53,11 @@ impl MapPermission {
         Self(self.0 | other.0)
     }
 
+    /// 从当前权限中剔除另一组权限（COW 清写位用）。
+    pub const fn without(self, other: Self) -> Self {
+        Self(self.0 & !other.0)
+    }
+
     /// 在写入 PTE 前校验公共权限组合。
     fn validate(self) -> Result<(), PageTableError> {
         if self.0 == 0 || self.contains(Self::WRITE) && !self.contains(Self::READ) {
@@ -79,6 +84,25 @@ impl core::ops::BitOr for MapPermission {
 
     fn bitor(self, rhs: Self) -> Self::Output {
         self.union(rhs)
+    }
+}
+
+impl From<PagePermissions> for MapPermission {
+    fn from(value: PagePermissions) -> Self {
+        let mut p = Self(0);
+        if value.read {
+            p = p.union(Self::READ);
+        }
+        if value.write {
+            p = p.union(Self::WRITE);
+        }
+        if value.execute {
+            p = p.union(Self::EXECUTE);
+        }
+        if value.user {
+            p = p.union(Self::USER);
+        }
+        p
     }
 }
 
@@ -128,6 +152,88 @@ impl PageTable {
             }
             if level + 1 == arch::mm::PAGE_LEVELS {
                 return (!entry.is_table()).then(|| PhysPageNum::new(entry.ppn()));
+            }
+            if !entry.is_table() {
+                return None;
+            }
+            table = PhysPageNum::new(entry.ppn());
+        }
+        None
+    }
+
+    /// 读取叶子映射的物理页与公共权限（vpn 非叶子或无映射时返回 None）。
+    pub fn leaf_info(&self, vpn: VirtPageNum) -> Option<(PhysPageNum, MapPermission, MemoryType)> {
+        let entry = self.leaf_entry(vpn)?;
+        let permissions = entry.permissions();
+        Some((
+            PhysPageNum::new(entry.ppn()),
+            MapPermission::from(permissions),
+            permissions.memory_type,
+        ))
+    }
+
+    /// 重写已有叶子映射的权限（保留物理页不变；用于 COW 解除时恢复写权限）。
+    /// vpn 不是叶子时返回 NotMapped。
+    pub fn set_leaf_permissions(
+        &mut self,
+        vpn: VirtPageNum,
+        permissions: MapPermission,
+        memory_type: MemoryType,
+    ) -> Result<(), PageTableError> {
+        permissions.validate()?;
+        let entry = self.leaf_entry_mut(vpn).ok_or(PageTableError::NotMapped)?;
+        let ppn = entry.ppn();
+        *entry = arch::mm::PageTableEntry::leaf(ppn, permissions.arch_permissions(memory_type));
+        Ok(())
+    }
+
+    /// 重写已有叶子映射的物理页与权限（COW 复制后指向新页）。
+    /// vpn 不是叶子时返回 NotMapped。
+    pub fn set_leaf(
+        &mut self,
+        vpn: VirtPageNum,
+        ppn: PhysPageNum,
+        permissions: MapPermission,
+        memory_type: MemoryType,
+    ) -> Result<(), PageTableError> {
+        permissions.validate()?;
+        let entry = self.leaf_entry_mut(vpn).ok_or(PageTableError::NotMapped)?;
+        *entry =
+            arch::mm::PageTableEntry::leaf(ppn.value(), permissions.arch_permissions(memory_type));
+        Ok(())
+    }
+
+    /// 定位叶子槽位（vpn 必须映射到叶子，中间表路径须完整）。
+    fn leaf_entry(&self, vpn: VirtPageNum) -> Option<&arch::mm::PageTableEntry> {
+        let indexes = vpn_indexes(vpn);
+        let mut table = self.root;
+        for (level, index) in indexes.into_iter().enumerate() {
+            let entry = &table_ref(table)[index];
+            if !entry.is_valid() {
+                return None;
+            }
+            if level + 1 == arch::mm::PAGE_LEVELS {
+                return (!entry.is_table()).then_some(entry);
+            }
+            if !entry.is_table() {
+                return None;
+            }
+            table = PhysPageNum::new(entry.ppn());
+        }
+        None
+    }
+
+    /// 可变定位叶子槽位（与 `leaf_entry` 同路径，返回可变引用）。
+    fn leaf_entry_mut(&mut self, vpn: VirtPageNum) -> Option<&mut arch::mm::PageTableEntry> {
+        let indexes = vpn_indexes(vpn);
+        let mut table = self.root;
+        for (level, index) in indexes.into_iter().enumerate() {
+            let entry = &table_ref(table)[index];
+            if !entry.is_valid() {
+                return None;
+            }
+            if level + 1 == arch::mm::PAGE_LEVELS {
+                return (!entry.is_table()).then_some(&mut table_mut(table)[index]);
             }
             if !entry.is_table() {
                 return None;
