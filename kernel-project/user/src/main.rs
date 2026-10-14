@@ -12,6 +12,7 @@ const SYS_FORK: usize = 220;
 const SYS_WAIT4: usize = 260;
 const SYS_EXECVE: usize = 221;
 const SYS_OPENAT: usize = 56;
+const AT_FDCWD: usize = (-100isize) as usize;
 const SYS_CLOSE: usize = 57;
 const SYS_READ: usize = 63;
 const SYS_DUP: usize = 23;
@@ -35,7 +36,10 @@ extern "C" fn _start() -> ! {
     for _ in 0..ROUNDS {
         let pid = syscall(SYS_FORK, [0; 6]) as isize;
         if pid < 0 {
-            syscall(SYS_WRITE, [1, b"FORK_FAIL\n".as_ptr() as usize, 10, 0, 0, 0]);
+            syscall(
+                SYS_WRITE,
+                [1, b"FORK_FAIL\n".as_ptr() as usize, 10, 0, 0, 0],
+            );
             syscall(SYS_EXIT, [1, 0, 0, 0, 0, 0]);
             loop {}
         }
@@ -44,8 +48,11 @@ extern "C" fn _start() -> ! {
             syscall(SYS_EXIT, [42, 0, 0, 0, 0, 0]);
             loop {}
         }
-        let mut status: usize = 0;
-        let r = syscall(SYS_WAIT4, [pid as usize, &mut status as *mut usize as usize, 0, 0, 0, 0]);
+        let mut status: i32 = 0;
+        let r = syscall(
+            SYS_WAIT4,
+            [pid as usize, &mut status as *mut i32 as usize, 0, 0, 0, 0],
+        );
         if r != pid || ((status >> 8) & 0xff) != 42 {
             syscall(SYS_WRITE, [1, b"FAIL\n".as_ptr() as usize, 5, 0, 0, 0]);
             syscall(SYS_EXIT, [1, 0, 0, 0, 0, 0]);
@@ -79,14 +86,17 @@ extern "C" fn _start() -> ! {
     // ==== G5 文件验收（ramfs + FD + 共享偏移）====
     // F1：openat 已存在文件 + read 校验 + close。
     let hello = b"/hello.txt\0";
-    let fd1 = syscall(SYS_OPENAT, [hello.as_ptr() as usize, 0, 0, 0, 0, 0]);
+    let fd1 = syscall(SYS_OPENAT, [AT_FDCWD, hello.as_ptr() as usize, 0, 0, 0, 0]);
     if fd1 < 0 {
         syscall(SYS_WRITE, [1, b"F1_FAIL\n".as_ptr() as usize, 8, 0, 0, 0]);
         syscall(SYS_EXIT, [1, 0, 0, 0, 0, 0]);
         loop {}
     }
     let mut buf1 = [0u8; 32];
-    let n1 = syscall(SYS_READ, [fd1 as usize, buf1.as_mut_ptr() as usize, 11, 0, 0, 0]);
+    let n1 = syscall(
+        SYS_READ,
+        [fd1 as usize, buf1.as_mut_ptr() as usize, 11, 0, 0, 0],
+    );
     if n1 != 11 || &buf1[..11] != b"hello ramfs" {
         syscall(SYS_WRITE, [1, b"F1_FAIL\n".as_ptr() as usize, 8, 0, 0, 0]);
         syscall(SYS_EXIT, [1, 0, 0, 0, 0, 0]);
@@ -97,7 +107,7 @@ extern "C" fn _start() -> ! {
 
     // F2：不存在文件 → -ENOENT。
     let nofile = b"/nofile\0";
-    let r2 = syscall(SYS_OPENAT, [nofile.as_ptr() as usize, 0, 0, 0, 0, 0]);
+    let r2 = syscall(SYS_OPENAT, [AT_FDCWD, nofile.as_ptr() as usize, 0, 0, 0, 0]);
     if r2 != -2 {
         syscall(SYS_WRITE, [1, b"F2_FAIL\n".as_ptr() as usize, 8, 0, 0, 0]);
         syscall(SYS_EXIT, [1, 0, 0, 0, 0, 0]);
@@ -107,23 +117,35 @@ extern "C" fn _start() -> ! {
 
     // F3：O_CREAT 创建 + 写 + 重开读回。
     let newfile = b"/new.txt\0";
-    let fd3 = syscall(SYS_OPENAT, [newfile.as_ptr() as usize, 2 | 0x40, 0, 0, 0, 0]);
+    let fd3 = syscall(
+        SYS_OPENAT,
+        [AT_FDCWD, newfile.as_ptr() as usize, 2 | 0x40, 0o600, 0, 0],
+    );
     if fd3 < 0 {
         syscall(SYS_WRITE, [1, b"F3_FAIL\n".as_ptr() as usize, 8, 0, 0, 0]);
         syscall(SYS_EXIT, [1, 0, 0, 0, 0, 0]);
         loop {}
     }
     let data3 = b"abcde";
-    let w3 = syscall(SYS_WRITE, [fd3 as usize, data3.as_ptr() as usize, 5, 0, 0, 0]);
+    let w3 = syscall(
+        SYS_WRITE,
+        [fd3 as usize, data3.as_ptr() as usize, 5, 0, 0, 0],
+    );
     if w3 != 5 {
         syscall(SYS_WRITE, [1, b"F3_FAIL\n".as_ptr() as usize, 8, 0, 0, 0]);
         syscall(SYS_EXIT, [1, 0, 0, 0, 0, 0]);
         loop {}
     }
     syscall(SYS_CLOSE, [fd3 as usize, 0, 0, 0, 0, 0]);
-    let fd3b = syscall(SYS_OPENAT, [newfile.as_ptr() as usize, 0, 0, 0, 0, 0]);
+    let fd3b = syscall(
+        SYS_OPENAT,
+        [AT_FDCWD, newfile.as_ptr() as usize, 0, 0, 0, 0],
+    );
     let mut buf3 = [0u8; 8];
-    let n3 = syscall(SYS_READ, [fd3b as usize, buf3.as_mut_ptr() as usize, 5, 0, 0, 0]);
+    let n3 = syscall(
+        SYS_READ,
+        [fd3b as usize, buf3.as_mut_ptr() as usize, 5, 0, 0, 0],
+    );
     if n3 != 5 || &buf3[..5] != b"abcde" {
         syscall(SYS_WRITE, [1, b"F3_FAIL\n".as_ptr() as usize, 8, 0, 0, 0]);
         syscall(SYS_EXIT, [1, 0, 0, 0, 0, 0]);
@@ -145,14 +167,20 @@ extern "C" fn _start() -> ! {
 
     // F5：dup 共享偏移——原 fd 读 2 后，dup fd 从同一偏移继续读。
     let dupfile = b"/dup.txt\0";
-    let fd5 = syscall(SYS_OPENAT, [dupfile.as_ptr() as usize, 2, 0, 0, 0, 0]);
+    let fd5 = syscall(
+        SYS_OPENAT,
+        [AT_FDCWD, dupfile.as_ptr() as usize, 2, 0, 0, 0],
+    );
     if fd5 < 0 {
         syscall(SYS_WRITE, [1, b"F5_FAIL\n".as_ptr() as usize, 8, 0, 0, 0]);
         syscall(SYS_EXIT, [1, 0, 0, 0, 0, 0]);
         loop {}
     }
     let mut b5a = [0u8; 2];
-    let n5 = syscall(SYS_READ, [fd5 as usize, b5a.as_mut_ptr() as usize, 2, 0, 0, 0]);
+    let n5 = syscall(
+        SYS_READ,
+        [fd5 as usize, b5a.as_mut_ptr() as usize, 2, 0, 0, 0],
+    );
     if n5 != 2 || b5a != *b"ab" {
         syscall(SYS_WRITE, [1, b"F5_FAIL\n".as_ptr() as usize, 8, 0, 0, 0]);
         syscall(SYS_EXIT, [1, 0, 0, 0, 0, 0]);
@@ -165,7 +193,10 @@ extern "C" fn _start() -> ! {
         loop {}
     }
     let mut b5b = [0u8; 4];
-    let n5b = syscall(SYS_READ, [fd5b as usize, b5b.as_mut_ptr() as usize, 4, 0, 0, 0]);
+    let n5b = syscall(
+        SYS_READ,
+        [fd5b as usize, b5b.as_mut_ptr() as usize, 4, 0, 0, 0],
+    );
     if n5b != 4 || b5b != *b"cdef" {
         syscall(SYS_WRITE, [1, b"F5_FAIL\n".as_ptr() as usize, 8, 0, 0, 0]);
         syscall(SYS_EXIT, [1, 0, 0, 0, 0, 0]);
@@ -177,7 +208,10 @@ extern "C" fn _start() -> ! {
 
     // F6：fork 共享偏移——父子各读 2 字节，合计恰好覆盖 {ab, cd}（顺序无关验收）。
     let forkfile = b"/fork.txt\0";
-    let fd6 = syscall(SYS_OPENAT, [forkfile.as_ptr() as usize, 2, 0, 0, 0, 0]);
+    let fd6 = syscall(
+        SYS_OPENAT,
+        [AT_FDCWD, forkfile.as_ptr() as usize, 2, 0, 0, 0],
+    );
     if fd6 < 0 {
         syscall(SYS_WRITE, [1, b"F6_FAIL\n".as_ptr() as usize, 8, 0, 0, 0]);
         syscall(SYS_EXIT, [1, 0, 0, 0, 0, 0]);
@@ -192,19 +226,28 @@ extern "C" fn _start() -> ! {
     if pid6 == 0 {
         // 子：读 2 字节，exit code = 首字节（'a'=97 / 'c'=99）。
         let mut cb = [0u8; 2];
-        syscall(SYS_READ, [fd6 as usize, cb.as_mut_ptr() as usize, 2, 0, 0, 0]);
+        syscall(
+            SYS_READ,
+            [fd6 as usize, cb.as_mut_ptr() as usize, 2, 0, 0, 0],
+        );
         syscall(SYS_EXIT, [cb[0] as usize, 0, 0, 0, 0, 0]);
         loop {}
     }
     let mut pb = [0u8; 2];
-    let n6 = syscall(SYS_READ, [fd6 as usize, pb.as_mut_ptr() as usize, 2, 0, 0, 0]);
+    let n6 = syscall(
+        SYS_READ,
+        [fd6 as usize, pb.as_mut_ptr() as usize, 2, 0, 0, 0],
+    );
     if n6 != 2 {
         syscall(SYS_WRITE, [1, b"F6_FAIL\n".as_ptr() as usize, 8, 0, 0, 0]);
         syscall(SYS_EXIT, [1, 0, 0, 0, 0, 0]);
         loop {}
     }
-    let mut status6: usize = 0;
-    let r6 = syscall(SYS_WAIT4, [pid6 as usize, &mut status6 as *mut usize as usize, 0, 0, 0, 0]);
+    let mut status6: i32 = 0;
+    let r6 = syscall(
+        SYS_WAIT4,
+        [pid6 as usize, &mut status6 as *mut i32 as usize, 0, 0, 0, 0],
+    );
     if r6 != pid6 {
         syscall(SYS_WRITE, [1, b"F6_FAIL\n".as_ptr() as usize, 8, 0, 0, 0]);
         syscall(SYS_EXIT, [1, 0, 0, 0, 0, 0]);
@@ -228,7 +271,10 @@ extern "C" fn _start() -> ! {
         [path.as_ptr() as usize, argv.as_ptr() as usize, 0, 0, 0, 0],
     );
     // 若到达：exec 未换现场（实现回归）。
-    syscall(SYS_WRITE, [1, b"EXEC_FAIL\n".as_ptr() as usize, 10, 0, 0, 0]);
+    syscall(
+        SYS_WRITE,
+        [1, b"EXEC_FAIL\n".as_ptr() as usize, 10, 0, 0, 0],
+    );
     syscall(SYS_EXIT, [1, 0, 0, 0, 0, 0]);
     loop {}
 }

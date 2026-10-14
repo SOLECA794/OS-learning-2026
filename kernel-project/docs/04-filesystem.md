@@ -4,6 +4,15 @@
 
 自研 VFS 层 + 先 tmpfs/ramfs 后 ext4 的具体文件系统，提供 Linux 语义的 open/read/write/stat/mmap 文件接口与页缓存，支撑 CAgent 文件类测例（一等奖工程量大头在此）与 BuildStorm 的编译 I/O。
 
+当前实现（2026-10-14）：`src/fs/mod.rs` 是路径/VFS 入口，`ramfs.rs` 持有目录树与文件内容，
+`file.rs` 持有共享打开描述；任务的 FD 槽位在 `src/kernel/task/fd_table.rs`。
+已支持用户态 mkdirat、子目录文件 IO、目录枚举与按子目录路径 exec；详见
+`log/rfc/M25-vfs/index.md` 的运行验收。下列四 trait、挂载、ext4 和缓存仍为后续设计，
+当前单一后端使用具体节点模型，第二个后端接入时再确定最小公共 trait。
+M3 已将 RISC-V `openat` 改为 `(dirfd, path, flags, mode)`，相对路径可从已打开的
+目录节点逐段查找；`mkdirat` 也共用目录 fd 路径起点。`AT_FDCWD` 当前指向根目录，
+尚无真正的进程 cwd 或权限模型。
+
 ## 2. 组成
 
 ```

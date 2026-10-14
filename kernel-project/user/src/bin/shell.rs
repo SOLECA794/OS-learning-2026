@@ -9,7 +9,7 @@
 //!   run <path>    —— fork，子进程 execve，父进程 wait4 打印退出码
 //! 未知命令打印 `sh: unknown: <cmd>`。
 //!
-//! 交互 console read 未实现（G5 残留风险登记），脚本驱动满足"固定输入脚本"要求；
+//! 控制台 read 已独立验收；本 shell 仍以固定脚本驱动，尚无交互式行编辑；
 //! 不宣称兼容 BusyBox（V2 §9：不凭提示符宣称兼容）。
 
 use core::arch::asm;
@@ -18,6 +18,7 @@ const SYS_WRITE: usize = 64;
 const SYS_READ: usize = 63;
 const SYS_CLOSE: usize = 57;
 const SYS_OPENAT: usize = 56;
+const AT_FDCWD: usize = (-100isize) as usize;
 const SYS_FORK: usize = 220;
 const SYS_WAIT4: usize = 260;
 const SYS_EXECVE: usize = 221;
@@ -80,21 +81,23 @@ fn write_code(code: usize) {
 }
 
 fn cmd_ls() {
-    let fd = syscall(SYS_OPENAT, [b"/\0".as_ptr() as usize, 0, 0, 0, 0, 0]);
+    let fd = syscall(SYS_OPENAT, [AT_FDCWD, b"/\0".as_ptr() as usize, 0, 0, 0, 0]);
     if fd < 0 {
         write_bytes(b"ls: open failed\n");
         return;
     }
     let mut buf = [0u8; 512];
     loop {
-        let n = syscall(SYS_GETDENTS64, [fd as usize, buf.as_mut_ptr() as usize, 512, 0, 0, 0]);
+        let n = syscall(
+            SYS_GETDENTS64,
+            [fd as usize, buf.as_mut_ptr() as usize, 512, 0, 0, 0],
+        );
         if n <= 0 {
             break;
         }
         let mut off = 0usize;
         while off < n as usize {
-            let reclen =
-                u16::from_ne_bytes([buf[off + 16], buf[off + 17]]) as usize;
+            let reclen = u16::from_ne_bytes([buf[off + 16], buf[off + 17]]) as usize;
             if reclen == 0 {
                 break;
             }
@@ -112,14 +115,17 @@ fn cmd_ls() {
 
 fn cmd_cat(path: &[u8]) {
     let p = path_buf(path);
-    let fd = syscall(SYS_OPENAT, [p.as_ptr() as usize, 0, 0, 0, 0, 0]);
+    let fd = syscall(SYS_OPENAT, [AT_FDCWD, p.as_ptr() as usize, 0, 0, 0, 0]);
     if fd < 0 {
         write_bytes(b"cat: open failed\n");
         return;
     }
     let mut buf = [0u8; 64];
     loop {
-        let n = syscall(SYS_READ, [fd as usize, buf.as_mut_ptr() as usize, 64, 0, 0, 0]);
+        let n = syscall(
+            SYS_READ,
+            [fd as usize, buf.as_mut_ptr() as usize, 64, 0, 0, 0],
+        );
         if n <= 0 {
             break;
         }
@@ -138,16 +144,22 @@ fn cmd_run(path: &[u8]) {
     if pid == 0 {
         // 子进程：execve 目标程序（argv = [path, NULL]）。
         let argv = [p.as_ptr() as usize, 0usize];
-        syscall(SYS_EXECVE, [p.as_ptr() as usize, argv.as_ptr() as usize, 0, 0, 0, 0]);
+        syscall(
+            SYS_EXECVE,
+            [p.as_ptr() as usize, argv.as_ptr() as usize, 0, 0, 0, 0],
+        );
         write_bytes(b"run: exec failed\n");
         syscall(SYS_EXIT, [127, 0, 0, 0, 0, 0]);
         loop {}
     }
-    let mut status: usize = 0;
-    let r = syscall(SYS_WAIT4, [pid as usize, &mut status as *mut usize as usize, 0, 0, 0, 0]);
+    let mut status: i32 = 0;
+    let r = syscall(
+        SYS_WAIT4,
+        [pid as usize, &mut status as *mut i32 as usize, 0, 0, 0, 0],
+    );
     if r == pid {
         write_bytes(b"[exit] code=");
-        write_code((status >> 8) & 0xff);
+        write_code(((status >> 8) & 0xff) as usize);
         write_bytes(b"\n");
     } else {
         write_bytes(b"run: wait failed\n");
@@ -161,7 +173,8 @@ fn exec_cmd(line: &[u8]) {
     while start < end && (line[start] == b' ' || line[start] == b'\t' || line[start] == b'\r') {
         start += 1;
     }
-    while end > start && (line[end - 1] == b' ' || line[end - 1] == b'\t' || line[end - 1] == b'\r') {
+    while end > start && (line[end - 1] == b' ' || line[end - 1] == b'\t' || line[end - 1] == b'\r')
+    {
         end -= 1;
     }
     let cmd = &line[start..end];
@@ -185,7 +198,7 @@ fn exec_cmd(line: &[u8]) {
 #[no_mangle]
 extern "C" fn _start() -> ! {
     let path = b"/cmds.txt\0";
-    let fd = syscall(SYS_OPENAT, [path.as_ptr() as usize, 0, 0, 0, 0, 0]);
+    let fd = syscall(SYS_OPENAT, [AT_FDCWD, path.as_ptr() as usize, 0, 0, 0, 0]);
     if fd < 0 {
         write_bytes(b"shell: /cmds.txt not found\n");
         syscall(SYS_EXIT, [1, 0, 0, 0, 0, 0]);
@@ -195,7 +208,17 @@ extern "C" fn _start() -> ! {
     let mut buf = [0u8; 1024];
     let mut total = 0usize;
     loop {
-        let n = syscall(SYS_READ, [fd as usize, buf[total..].as_mut_ptr() as usize, buf.len() - total, 0, 0, 0]);
+        let n = syscall(
+            SYS_READ,
+            [
+                fd as usize,
+                buf[total..].as_mut_ptr() as usize,
+                buf.len() - total,
+                0,
+                0,
+                0,
+            ],
+        );
         if n <= 0 {
             break;
         }

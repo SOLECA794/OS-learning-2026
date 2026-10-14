@@ -15,6 +15,7 @@
 - KTEST 事件（BEGIN/CASE/END）以换行结束，由实际断言产生；用户程序普通输出
   不能充当内核断言结果；未执行的用例不准打印 PASS。
 - make 对外只承诺 0/非 0，详细原因读 result.json。
+- 可选输入 fixture 在串口输出命中指定标记后通过 PTY 注入；默认仍关闭 stdin。
 
 用法：
   python tools/run_qemu.py --qemu <bin> --flags "<flags>" \
@@ -24,9 +25,11 @@
 退出码：0 = 测试通过；1 = 测试失败或运行器错误。
 """
 import argparse
+import errno
 import hashlib
 import json
 import os
+import pty
 import re
 import select
 import signal
@@ -165,7 +168,25 @@ def main():
     ap.add_argument("--pattern", default=None)
     ap.add_argument("--run-id", default=None)
     ap.add_argument("--elf", default=None)
+    ap.add_argument("--stdin-file", default=None,
+                    help="最多 4096 字节的串口输入 fixture")
+    ap.add_argument("--stdin-after", default=None,
+                    help="串口输出命中此正则后才注入 fixture")
     args = ap.parse_args()
+
+    if bool(args.stdin_file) != bool(args.stdin_after):
+        ap.error("--stdin-file 和 --stdin-after 必须同时指定")
+    fixture = None
+    fixture_sha = None
+    if args.stdin_file:
+        with open(args.stdin_file, "rb") as f:
+            fixture = f.read(4097)
+        if not fixture or len(fixture) > 4096:
+            ap.error("输入 fixture 必须为 1..4096 字节")
+        if b"\x01" in fixture:
+            ap.error("输入 fixture 不得含 Ctrl-A（QEMU mon:stdio 转义键）")
+        fixture_sha = hashlib.sha256(fixture).hexdigest()
+    input_marker = re.compile(args.stdin_after.encode("utf-8")) if fixture else None
 
     qemu = args.qemu
     flags = args.flags
@@ -198,24 +219,37 @@ def main():
     start = time.time()
     deadline = start + timeout
 
+    serial_master = None
+    serial_slave = None
+    qemu_argv = [qemu] + flags.split()
     try:
+        if fixture:
+            # `mon:stdio` 在普通 stdin pipe 上直到 EOF 才交付输入；EOF 又可能
+            # 直接让 QEMU 退出。PTY 与真实交互终端一致，既能即时交付也保持连接。
+            serial_master, serial_slave = pty.openpty()
         proc = subprocess.Popen(
-            [qemu] + flags.split(),
-            stdout=subprocess.PIPE,
+            qemu_argv,
+            stdout=serial_slave if fixture else subprocess.PIPE,
             stderr=subprocess.PIPE,
-            stdin=subprocess.DEVNULL,
+            stdin=serial_slave if fixture else subprocess.DEVNULL,
             start_new_session=True,
             bufsize=0,
         )
     except FileNotFoundError:
+        if serial_master is not None:
+            os.close(serial_master)
+            os.close(serial_slave)
         fail_fast("工具缺失", "无法启动 QEMU: %s" % qemu, args, arch)
         return 1
+    if serial_slave is not None:
+        os.close(serial_slave)
 
     ktest = KtestParser()
     matched = {"hit": False, "when": None}
+    input_state = {"offset": 0, "armed": False, "sent": False}
     # 滚动窗口：跨 chunk / 无换行 pattern 检测（fatal trap 等尾行常无 \n）。
     scan_tail = bytearray()
-    tail_win = MAX_LINE + len(pattern_re.pattern) + 4096
+    tail_win = MAX_LINE + len(pattern_re.pattern) + (len(input_marker.pattern) if input_marker else 0) + 4096
 
     def on_line(line: bytes):
         ktest.feed(line)
@@ -225,7 +259,8 @@ def main():
 
     serial_asm = LineAssembler(on_line)
 
-    stdout_fd, stderr_fd = proc.stdout.fileno(), proc.stderr.fileno()
+    stdout_fd = serial_master if fixture else proc.stdout.fileno()
+    stderr_fd = proc.stderr.fileno()
     eof = {stdout_fd: False, stderr_fd: False}
     reason = None
     while True:
@@ -239,7 +274,14 @@ def main():
             continue
         for fd in rlist:
             if fd == stdout_fd and not eof[fd]:
-                buf = os.read(fd, 65536)
+                try:
+                    buf = os.read(fd, 65536)
+                except OSError as exc:
+                    # Linux PTY master 在 slave 关闭后以 EIO 报告 EOF。
+                    if fixture and exc.errno == errno.EIO:
+                        buf = b""
+                    else:
+                        raise
                 if buf:
                     with open(serial_path, "ab") as lf:
                         lf.write(buf)
@@ -251,6 +293,8 @@ def main():
                     if not matched["hit"] and pattern_re.search(bytes(scan_tail)):
                         matched["hit"] = True
                         matched["when"] = round(time.time() - start, 3)
+                    if input_marker and not input_state["armed"] and input_marker.search(bytes(scan_tail)):
+                        input_state["armed"] = True
                 else:
                     eof[fd] = True
             elif fd == stderr_fd and not eof[fd]:
@@ -260,6 +304,20 @@ def main():
                         lf.write(buf)
                 else:
                     eof[fd] = True
+        if fixture and input_state["armed"] and not input_state["sent"]:
+            # 小 fixture 分段非阻塞写；Guest 不读取时仍受总截止时间保护。
+            _, writable, _ = select.select([], [serial_master], [], 0)
+            if writable:
+                offset = input_state["offset"]
+                try:
+                    written = os.write(serial_master, fixture[offset:])
+                except BrokenPipeError:
+                    reason = "INPUT_PIPE_CLOSED"
+                    break
+                input_state["offset"] += written
+                if input_state["offset"] == len(fixture):
+                    input_state["sent"] = True
+                    # PTY 保持打开，直到本次有界运行完成。
         if matched["hit"]:
             if proc.poll() is not None:
                 reason = "NORMAL_EXIT"
@@ -292,6 +350,8 @@ def main():
     end = time.time()
     raw_rc = proc.returncode
     serial_asm.finish()
+    if serial_master is not None:
+        os.close(serial_master)
 
     ktest_summary = ktest.summary()
     passed = False
@@ -307,6 +367,9 @@ def main():
     else:
         passed = False
         reason = reason or "UNKNOWN"
+    if fixture and not input_state["sent"]:
+        passed = False
+        reason = "INPUT_NOT_SENT" if reason in ("MATCHED", "NORMAL_EXIT") else reason
 
     result = {
         "run_id": run_id,
@@ -315,12 +378,14 @@ def main():
         "version": git_rev(),
         "source": {"repo": "OS-learning-2026", "commit": git_rev()},
         "elf": {"path": elf_path, "sha256": elf_sha},
-        "qemu": {"version": qemu_version(qemu), "argv": [qemu] + flags.split()},
+        "qemu": {"version": qemu_version(qemu), "argv": qemu_argv},
         "time": {"start": start, "end": end, "elapsed_s": round(end - start, 3),
                  "budget_s": timeout},
         "exit": {"code": raw_rc, "reason": reason},
         "logs": {"serial": serial_path, "stderr": stderr_path},
         "pattern": pattern,
+        "stdin": {"fixture_sha256": fixture_sha, "after": args.stdin_after,
+                  "sent": input_state["sent"]} if fixture else None,
         "ktest": ktest_summary,
         "passed": passed,
     }

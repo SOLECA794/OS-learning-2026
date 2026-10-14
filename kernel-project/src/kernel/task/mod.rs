@@ -17,6 +17,8 @@ use alloc::boxed::Box;
 use alloc::collections::VecDeque;
 use alloc::vec::Vec;
 
+pub(crate) mod fd_table;
+
 use crate::arch;
 use crate::kernel::mm::address::{AddressRange, VirtAddr};
 use crate::kernel::mm::kernel_stack::KernelStack;
@@ -91,7 +93,9 @@ pub(crate) enum TaskState {
     /// 当前占用 CPU（不在就绪队列）。
     Running,
     /// 等待子任务退出（不在就绪队列；子 exit 时唤醒）。
-    Waiting,
+    WaitingChild,
+    /// 等待控制台输入（不在就绪队列；UART RX 时唤醒）。
+    WaitingConsole,
     /// 已退出（僵尸，等待父回收；不在就绪队列）。
     Exited,
 }
@@ -112,7 +116,7 @@ pub(crate) struct TaskControlBlock {
     /// 内核态切换现场（`__switch` 保存/恢复）。
     pub task_ctx: arch::task::TaskContext,
     /// 进程 FD 表（V2 §9：open/dup/close 的唯一入口；fork 整表复制共享偏移）。
-    pub fds: crate::kernel::fs::file::FdTable,
+    pub fds: fd_table::FdTable,
 }
 
 /// 全局调度状态。并发前提见模块头。
@@ -195,7 +199,7 @@ pub(crate) fn create_task(
         space: Box::new(space),
         kstack,
         task_ctx,
-        fds: crate::kernel::fs::file::FdTable::new(),
+        fds: fd_table::FdTable::new(),
     })
 }
 
@@ -241,16 +245,37 @@ pub(crate) fn schedule() {
         let next = match sched.ready.pop_front() {
             Some(next) => next,
             None => {
-                // 就绪队列空：全员阻塞/退出。W4 无事件机制（boundary 登记）→ park 停机。
+                let awaiting_console = sched
+                    .tasks
+                    .iter()
+                    .flatten()
+                    .any(|t| t.state == TaskState::WaitingConsole);
                 drop(sched);
-                crate::log_info!("[sched] ready queue empty, parking");
-                crate::arch::park();
-                unreachable!("park returned")
+                if !awaiting_console {
+                    crate::log_info!("[sched] ready queue empty, parking");
+                    crate::arch::park();
+                }
+                crate::log_info!("[sched] idle waiting for console input");
+                // 当前任务内核栈充当临时 idle 栈；被 IRQ 唤醒后仍从此处继续。
+                // 没有并发退出/回收该任务：单 hart，SIE 仅在 idle_once 中打开。
+                loop {
+                    if !SCHED.lock().ready.is_empty() {
+                        break;
+                    }
+                    arch::interrupt::idle_once();
+                }
+                sched = SCHED.lock();
+                sched
+                    .ready
+                    .pop_front()
+                    .expect("idle woke without a ready task")
             }
         };
         if next == current {
+            sched.tasks[current].as_mut().unwrap().state = TaskState::Running;
             return;
         }
+        sched.tasks[next].as_mut().unwrap().state = TaskState::Running;
         // 两槽互异且均被占用，Box 地址稳定（Vec 重排不影响）。
         let old_ptr: *mut arch::task::TaskContext = {
             let t = sched.tasks[current]
@@ -299,36 +324,57 @@ pub(crate) fn exec_replace_space(new_space: MemorySet) {
         .space = Box::new(new_space);
 }
 /// RV 启动单任务（M3）：T0 直进用户态，由 uapp 自行 fork 建立父子关系。
-pub(crate) fn boot_tasks() -> ! {
+pub(crate) fn boot_tasks(hartid: usize) -> ! {
     crate::arch::timer::init();
-    crate::kernel::fs::init();
+    crate::arch::interrupt::init(hartid);
+    crate::fs::init();
     #[cfg(feature = "uapp-fault-test")]
     const UAPP_ELF: &[u8] = include_bytes!("../../../build/user/uapp_fault.elf");
     // G5 shell 演示模式（make run-shell）：task0 = shell.elf，跑固定输入脚本 /cmds.txt。
     #[cfg(all(
         feature = "uapp-shell",
         not(feature = "uapp-fault-test"),
-        not(feature = "uapp-cow")
+        not(feature = "uapp-cow"),
+        not(feature = "uapp-vfs"),
+        not(feature = "uapp-console")
     ))]
     const UAPP_ELF: &[u8] = include_bytes!("../../../build/user/shell.elf");
     // G6 COW 验收模式（make run-cow）：task0 = uapp-cow.elf，输出 C1–C5 断言。
     #[cfg(all(
         feature = "uapp-cow",
         not(feature = "uapp-shell"),
-        not(feature = "uapp-fault-test")
+        not(feature = "uapp-fault-test"),
+        not(feature = "uapp-vfs"),
+        not(feature = "uapp-console")
     ))]
     const UAPP_ELF: &[u8] = include_bytes!("../../../build/user/uapp-cow.elf");
     #[cfg(all(
+        feature = "uapp-console",
+        not(feature = "uapp-vfs"),
+        not(feature = "uapp-shell"),
+        not(feature = "uapp-cow"),
+        not(feature = "uapp-fault-test")
+    ))]
+    const UAPP_ELF: &[u8] = include_bytes!("../../../build/user/uapp-console.elf");
+    #[cfg(all(feature = "uapp-vfs", not(feature = "uapp-fault-test")))]
+    const UAPP_ELF: &[u8] = include_bytes!("../../../build/user/uapp-vfs.elf");
+    #[cfg(all(
         not(feature = "uapp-shell"),
         not(feature = "uapp-fault-test"),
-        not(feature = "uapp-cow")
+        not(feature = "uapp-cow"),
+        not(feature = "uapp-vfs"),
+        not(feature = "uapp-console")
     ))]
     const UAPP_ELF: &[u8] = include_bytes!("../../../build/user/uapp.elf");
     let uapp: &[u8] = UAPP_ELF;
     let elf = crate::kernel::elf::parse(uapp).expect("uapp ELF parse failed");
 
     let t0 = create_task(&elf, uapp).expect("task0 create failed");
+    #[cfg(feature = "m28-frame-fault-test")]
+    crate::kernel::mm::memory_set::test_cow_allocation_failures();
     let (ppn, ctx) = launch_first(t0);
+    #[cfg(feature = "m28-frame-fault-test")]
+    test_fork_current_allocation_failures();
 
     crate::log_info!("M3: task 0 ready, timer armed, entering user mode (uapp will fork)");
     // SAFETY: ppn 是 T0 的有效根页表（launch_first 返回）。
@@ -338,7 +384,7 @@ pub(crate) fn boot_tasks() -> ! {
 
 /// 以显式闭包访问当前任务的 FD 表（V2 §3：fs/syscall 不读取 Task 私有字段）。
 /// 闭包内不得再取 SCHED 锁（锁已在持有中）。
-pub(crate) fn with_current_fds<R>(f: impl FnOnce(&mut crate::kernel::fs::file::FdTable) -> R) -> R {
+pub(crate) fn with_current_fds<R>(f: impl FnOnce(&mut fd_table::FdTable) -> R) -> R {
     let mut sched = SCHED.lock();
     let current = sched.current;
     let t = sched.tasks[current].as_mut().expect("current task missing");
@@ -362,8 +408,8 @@ pub(crate) fn with_current_space<R>(
 }
 /// wait4 单步检查结果。
 pub(crate) enum WaitResult {
-    /// 子已退出并完成回收（槽已释放，调用方不得再引用）。
-    Reaped { pid: usize, exit_code: i32 },
+    /// 子已退出的临时快照；资源仍由任务槽持有，写回成功后才能回收。
+    Exited { pid: usize, exit_code: i32 },
     /// 存在未退出的子任务（调用方可选择阻塞等待）。
     WouldBlock,
     /// 没有匹配的子任务（Linux ECHILD）。
@@ -383,6 +429,8 @@ pub(crate) fn fork_current() -> Result<usize, isize> {
     let mut sched = SCHED.lock();
     let current = sched.current;
 
+    // 先完成可能失败的内核栈分配，避免失败的 fork 已经改变父页权限。
+    let kstack = KernelStack::new().map_err(|_| ENOMEM)?;
     // COW 复制地址空间：父可写页同步改为只读共享（需 &mut 父 space）。
     let new_space = {
         let parent = sched.tasks[current].as_mut().unwrap();
@@ -395,7 +443,6 @@ pub(crate) fn fork_current() -> Result<usize, isize> {
     // 新内核栈 + 子现场（父现场副本，a0=0）。
     let (kstack, task_ctx) = {
         let parent = sched.tasks[current].as_ref().unwrap();
-        let kstack = KernelStack::new().map_err(|_| ENOMEM)?;
         let kstack_top = kstack.top();
         let frame_size = core::mem::size_of::<arch::trap::TrapContext>();
         let parent_ctx_ptr = (parent.kstack.top() - frame_size) as *const arch::trap::TrapContext;
@@ -440,6 +487,34 @@ pub(crate) fn fork_current() -> Result<usize, isize> {
     Ok(child_id)
 }
 
+/// 测试完整 fork 路径的早期故障：第 0 点是连续内核栈，第 1 点起为子页表。
+/// 只在启动首任务之后、恢复用户态之前执行，因此任务槽和等待队列均应保持原样。
+#[cfg(feature = "m28-frame-fault-test")]
+fn test_fork_current_allocation_failures() {
+    use crate::kernel::mm::{address::VirtAddr, frame_allocator};
+    let baseline_frames = frame_allocator::allocated_count();
+    let baseline_refs = frame_allocator::test_shared_ref_entries();
+    let stack_vpn = VirtAddr::new(USER_STACK_TOP - 0x1000).floor();
+    assert!(!with_current_space(|space| space.cow_contains(stack_vpn)).unwrap());
+    for budget in 0..9 {
+        frame_allocator::set_test_failure_budget(Some(budget));
+        assert_eq!(
+            fork_current(),
+            Err(-12),
+            "fork succeeded at point {}",
+            budget
+        );
+        assert_eq!(frame_allocator::test_allocation_attempts(), budget + 1);
+        assert_eq!(frame_allocator::allocated_count(), baseline_frames);
+        assert_eq!(frame_allocator::test_shared_ref_entries(), baseline_refs);
+        assert!(!with_current_space(|space| space.cow_contains(stack_vpn)).unwrap());
+        let sched = SCHED.lock();
+        assert_eq!(sched.tasks.len(), 1, "failed fork published child task");
+        assert!(sched.ready.is_empty(), "failed fork published ready child");
+    }
+    crate::log_info!("M28-FORK-OOM-PASS points=9");
+}
+
 /// exit：标记 Exited 并存储退出码；唤醒等待本任务的父；调度切走，永不返回。
 ///
 /// 资源不立即释放（僵尸语义）：父 wait4 回收时 drop space/kstack。
@@ -456,7 +531,7 @@ pub(crate) fn exit_current(code: i32) -> ! {
         let parent = sched.tasks[current].as_ref().unwrap().parent;
         if let Some(pid) = parent {
             if let Some(p) = sched.tasks[pid].as_mut() {
-                if p.state == TaskState::Waiting {
+                if p.state == TaskState::WaitingChild {
                     p.state = TaskState::Ready;
                     sched.ready.push_back(pid);
                 }
@@ -469,48 +544,90 @@ pub(crate) fn exit_current(code: i32) -> ! {
     unreachable!("exited task resumed")
 }
 
-/// wait4 单步：子已退出 → 回收并返回；存在未退出子 → WouldBlock；无子 → NoChild。
+/// 只观察退出状态，不消费僵尸；必须扫描所有匹配任务，不能被运行中的子任务挡住。
 pub(crate) fn wait4_step(pid: isize) -> WaitResult {
-    let mut sched = SCHED.lock();
+    let sched = SCHED.lock();
     let current = sched.current;
-    let found = sched.tasks.iter().enumerate().find(|(id, slot)| {
-        *id != current
-            && slot.as_ref().map_or(false, |t| {
-                t.parent == Some(current) && (pid < 0 || *id as isize == pid)
-            })
-    });
-    match found {
-        Some((child_id, Some(tcb))) if tcb.state == TaskState::Exited => {
-            let exit_code = tcb.exit_code;
-            // NLL：tcb 借用已在最后一次使用结束，槽回收合法。
-            let _ = found;
-            // 回收：drop space/kstack（Box 释放），槽位置空。
-            sched.tasks[child_id] = None;
-            crate::log_info!(
-                "[wait] reaped task {} code {}  (frames={} wm={})",
-                child_id,
-                exit_code,
-                crate::kernel::mm::frame_allocator::allocated_count(),
-                crate::kernel::mm::frame_allocator::bump_watermark()
-            );
-            WaitResult::Reaped {
-                pid: child_id,
-                exit_code,
+    let mut has_child = false;
+    for (child_id, tcb) in sched
+        .tasks
+        .iter()
+        .enumerate()
+        .filter_map(|(id, t)| t.as_ref().map(|t| (id, t)))
+    {
+        if tcb.parent == Some(current) && (pid < 0 || child_id as isize == pid) {
+            has_child = true;
+            if tcb.state == TaskState::Exited {
+                return WaitResult::Exited {
+                    pid: child_id,
+                    exit_code: tcb.exit_code,
+                };
             }
         }
-        Some(_) => WaitResult::WouldBlock,
-        None => WaitResult::NoChild,
+    }
+    if has_child {
+        WaitResult::WouldBlock
+    } else {
+        WaitResult::NoChild
     }
 }
 
-/// 当前任务阻塞等待子任务：状态 Waiting（不入就绪队列）后调度切走；
+/// 状态写回成功后提交回收。当前单核、内核不可抢占，观察与提交之间不调度，
+/// 也不存在同进程的另一个等待者；引入 SMP/线程后必须重新设计等待认领协议。
+pub(crate) fn reap_child(pid: usize) {
+    let mut sched = SCHED.lock();
+    let child = sched.tasks[pid].as_ref().expect("wait child disappeared");
+    assert!(child.parent == Some(sched.current) && child.state == TaskState::Exited);
+    let exit_code = child.exit_code;
+    // 任务模块是回收的唯一 owner；释放地址空间、内核栈以及 FD 引用。
+    sched.tasks[pid] = None;
+    crate::log_info!(
+        "[wait] reaped task {} code {}  (frames={} wm={})",
+        pid,
+        exit_code,
+        crate::kernel::mm::frame_allocator::allocated_count(),
+        crate::kernel::mm::frame_allocator::bump_watermark()
+    );
+}
+
+/// 当前任务阻塞等待子任务：状态 WaitingChild（不入就绪队列）后调度切走；
 /// 被唤醒后从 schedule 返回，调用方应重新执行 wait 检查。
 pub(crate) fn block_current_and_wait() {
     {
         let mut sched = SCHED.lock();
         let current = sched.current;
         let t = sched.tasks[current].as_mut().unwrap();
-        t.state = TaskState::Waiting;
+        t.state = TaskState::WaitingChild;
     }
     schedule();
+}
+
+/// 在 SIE=0 的 syscall 上下文中，原子完成「确认无数据 → 登记等待」。
+/// IRQ 只能在返回用户态或 idle_once 打开中断后进入，因此不会丢唤醒。
+pub(crate) fn block_current_on_console_if_empty() {
+    let current = {
+        let mut sched = SCHED.lock();
+        if arch::console::has_input() {
+            return;
+        }
+        let current = sched.current;
+        sched.tasks[current].as_mut().unwrap().state = TaskState::WaitingConsole;
+        current
+    };
+    crate::log_info!("[console] task {} waiting for input", current);
+    schedule();
+}
+
+/// UART IRQ 在字节进入 RX 队列后调用；只改变 task 状态，不消费字节。
+/// 多个读者可一起唤醒并重新竞争字节，未拿到数据者会再次等待。
+pub(crate) fn wake_console_readers() {
+    let mut sched = SCHED.lock();
+    for id in 0..sched.tasks.len() {
+        if let Some(t) = sched.tasks[id].as_mut() {
+            if t.state == TaskState::WaitingConsole {
+                t.state = TaskState::Ready;
+                sched.ready.push_back(id);
+            }
+        }
+    }
 }

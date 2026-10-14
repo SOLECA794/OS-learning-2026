@@ -17,8 +17,6 @@
 static BOOT_LOCK: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
 
 pub(crate) mod elf;
-#[cfg(feature = "arch-riscv64")]
-pub(crate) mod fs;
 pub(crate) mod mm;
 mod syscall;
 #[cfg(feature = "arch-riscv64")]
@@ -98,7 +96,7 @@ pub fn main(hartid: usize, dtb_pa: usize) -> ! {
     mm::init();
     crate::log_info!("M1 paging/trap foundation OK");
     crate::log_info!("M1.5: entering user mode");
-    init_user()
+    init_user(hartid)
 }
 
 /// 加载内嵌 uapp，构造用户地址空间与内核栈，进入用户态（M1.5 单任务闭环）。
@@ -106,13 +104,13 @@ pub fn main(hartid: usize, dtb_pa: usize) -> ! {
 /// 流程：ELF 解析 → 用户 MemorySet（内核映射+用户段+用户栈）→ 拷段内容 →
 /// 激活用户页表 → 内核栈顶放置 TrapContext → sscratch=栈顶 → restore 进 U 模式。
 #[cfg(feature = "arch-riscv64")]
-fn init_user() -> ! {
+fn init_user(hartid: usize) -> ! {
     // M2 起：双任务 + 用户态时钟抢占（W3，见 log/boundary/M2-scheduler-rv.md）。
-    crate::kernel::task::boot_tasks()
+    crate::kernel::task::boot_tasks(hartid)
 }
 
 #[cfg(feature = "arch-loongarch64")]
-fn init_user() -> ! {
+fn init_user(_hartid: usize) -> ! {
     // LA 保持单任务路径（W9-10 排期对齐用户态调度）。
     init_user_legacy()
 }

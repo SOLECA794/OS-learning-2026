@@ -53,7 +53,7 @@ impl From<PageTableError> for MemoryError {
 pub enum MapType {
     /// 虚拟页号与物理页号相同，数据页不归 MemorySet 所有。
     Identity,
-    /// 每个虚拟页由 MemorySet 分配并独占一个物理页。
+    /// 每个虚拟页持有一个物理页引用；fork 后可与其它地址空间共享。
     Framed,
 }
 
@@ -324,7 +324,7 @@ impl MemorySet {
     ///
     /// - 可写叶：父 PTE 清写位并登记 COW，子 PTE 同（共享物理页），引用计数 +1；
     /// - 已 COW 叶：子继续共享，引用计数 +1；
-    /// - 只读/可执行叶：直接共享 PTE，不登记（永不写，无需复制）；
+    /// - 只读/可执行叶：共享并增加引用计数，但不登记 COW（不可写）；
     /// - Identity 区域（内核映射）跳过，按参数重建。
     /// 需要 &mut self：父地址空间的 PTE 也要改为 COW 只读。
     pub fn dup_cow(
@@ -338,33 +338,56 @@ impl MemorySet {
             if area.map_type != MapType::Framed {
                 continue;
             }
+            let slot = new_set
+                .areas
+                .iter()
+                .position(Option::is_none)
+                .ok_or(MemoryError::AreaLimit)?;
             let mut vpn = area.range.start();
-            while vpn < area.range.end() {
-                let (ppn, perms, memtype) = self
-                    .page_table
-                    .leaf_info(vpn)
-                    .ok_or(MemoryError::AreaNotFound)?;
-                let was_cow = self.cow_pages.contains(&vpn);
-                let child_perms = if perms.contains(MapPermission::WRITE) || was_cow {
-                    // 共享写页 → 双侧 COW：父/子 PTE 均清写位。
-                    if !was_cow {
-                        let ro = perms.without(MapPermission::WRITE);
-                        self.page_table.set_leaf_permissions(vpn, ro, memtype)?;
-                        self.cow_pages.insert(vpn);
-                    }
+            // 构造期间父空间保持原样；失败只撤销当前区间已完成的映射。
+            // 已完成区域由 new_set 的 Drop 释放，所有叶子（包括只读页）都持有引用。
+            let result = (|| -> Result<(), MemoryError> {
+                while vpn < area.range.end() {
+                    let (ppn, perms, memtype) = self
+                        .page_table
+                        .leaf_info(vpn)
+                        .ok_or(MemoryError::AreaNotFound)?;
+                    let was_cow = self.cow_pages.contains(&vpn);
+                    let child_perms = if perms.contains(MapPermission::WRITE) || was_cow {
+                        new_set.cow_pages.insert(vpn);
+                        perms.without(MapPermission::WRITE)
+                    } else {
+                        perms
+                    };
+                    new_set
+                        .page_table
+                        .map(vpn, ppn, child_perms, memtype)
+                        .map_err(MemoryError::from)?;
+                    // 只有映射成功才获取新引用；map 失败时没有孤立的引用计数。
                     frame_allocator::cow_retain(ppn);
-                    new_set.cow_pages.insert(vpn);
-                    perms.without(MapPermission::WRITE)
-                } else {
-                    perms
-                };
-                new_set
-                    .page_table
-                    .map(vpn, ppn, child_perms, memtype)
-                    .map_err(MemoryError::from)?;
-                vpn = vpn.checked_add(1)?;
+                    vpn = vpn.checked_add(1).expect("mapped VPN overflow");
+                }
+                Ok(())
+            })();
+            if let Err(error) = result {
+                area.rollback(&mut new_set.page_table, area.range.start(), vpn);
+                return Err(error);
             }
+            new_set.areas[slot] = Some(*area);
         }
+        // 所有可能返回 ENOMEM 的页表构造已完成，才提交父空间的只读权限。
+        // 这些叶子刚刚验证存在，更新失败属于内部不变量损坏而非可恢复分配失败。
+        for &vpn in &new_set.cow_pages {
+            let (_, perms, memtype) = self
+                .page_table
+                .leaf_info(vpn)
+                .expect("COW parent leaf missing");
+            self.page_table
+                .set_leaf_permissions(vpn, perms.without(MapPermission::WRITE), memtype)
+                .expect("COW parent permission commit failed");
+            self.cow_pages.insert(vpn);
+        }
+        crate::arch::mm::flush_tlb();
         Ok(new_set)
     }
 
@@ -411,6 +434,111 @@ impl MemorySet {
     /// 查询虚拟页是否处于 COW 共享状态（trap 分发用）。
     pub(crate) fn cow_contains(&self, vpn: VirtPageNum) -> bool {
         self.cow_pages.contains(&vpn)
+    }
+
+    /// 把已映射的用户可读页复制到内核拥有的缓冲区，不向外暴露用户页借用。
+    /// COW 页虽然暂时不可写，但仍保留 READ|USER 权限，可正常读取。
+    pub(crate) fn copy_from_user(&self, src: usize, len: usize) -> Result<Vec<u8>, MemoryError> {
+        if len == 0 {
+            return Ok(Vec::new());
+        }
+        let end = src.checked_add(len).ok_or(MemoryError::AreaNotFound)?;
+        let mut page = VirtAddr::new(src).floor();
+        let end_page = VirtAddr::new(end - 1).floor();
+        loop {
+            let (_, perms, _) = self
+                .page_table
+                .leaf_info(page)
+                .ok_or(MemoryError::AreaNotFound)?;
+            if !perms.contains(MapPermission::USER | MapPermission::READ) {
+                return Err(MemoryError::AreaNotFound);
+            }
+            if page == end_page {
+                break;
+            }
+            page = page.checked_add(1)?;
+        }
+        let mut data = alloc::vec![0u8; len];
+        let mut copied = 0;
+        while copied < len {
+            let va = src + copied;
+            let vpn = VirtAddr::new(va).floor();
+            let ppn = self
+                .page_table
+                .translate(vpn)
+                .ok_or(MemoryError::AreaNotFound)?;
+            let offset = va & (super::address::PAGE_SIZE - 1);
+            let n = (super::address::PAGE_SIZE - offset).min(len - copied);
+            let phys = (ppn.value() << super::address::PAGE_SHIFT) + offset;
+            // SAFETY: 整个范围已确认是用户可读叶子页；身份映射使物理页在内核可读。
+            unsafe {
+                core::ptr::copy_nonoverlapping(phys as *const u8, data[copied..].as_mut_ptr(), n)
+            };
+            copied += n;
+        }
+        Ok(data)
+    }
+
+    /// 从内核缓冲区写入当前地址空间的用户页，包含跨页与 COW 处理。
+    /// 先检查全部目的页，避免地址错误导致部分写入；写入走物理页身份映射，
+    /// 不依赖 S-mode 的 SUM 位，也不会在内核写入时触发用户页的 store fault。
+    pub(crate) fn copy_to_user(&mut self, dst: usize, data: &[u8]) -> Result<(), MemoryError> {
+        if data.is_empty() {
+            return Ok(());
+        }
+        self.prepare_user_write(dst, data.len())?;
+        let mut copied = 0;
+        while copied < data.len() {
+            let va = dst + copied;
+            let vpn = VirtAddr::new(va).floor();
+            let ppn = self
+                .page_table
+                .translate(vpn)
+                .ok_or(MemoryError::AreaNotFound)?;
+            let offset = va & (super::address::PAGE_SIZE - 1);
+            let n = (super::address::PAGE_SIZE - offset).min(data.len() - copied);
+            let phys = (ppn.value() << super::address::PAGE_SHIFT) + offset;
+            // SAFETY: 叶子已校验为用户可写且 COW 已解除；物理页由当前地址空间持有。
+            unsafe { core::ptr::copy_nonoverlapping(data[copied..].as_ptr(), phys as *mut u8, n) };
+            copied += n;
+        }
+        Ok(())
+    }
+
+    /// 在消费外部输入前校验并预先解除目的范围的 COW；不写入任何用户字节。
+    /// 同一任务在 syscall 内不会与其他 hart 并发改写地址空间（M2 单核约束）。
+    pub(crate) fn prepare_user_write(&mut self, dst: usize, len: usize) -> Result<(), MemoryError> {
+        if len == 0 {
+            return Ok(());
+        }
+        let end = dst.checked_add(len).ok_or(MemoryError::AreaNotFound)?;
+        let mut page = VirtAddr::new(dst).floor();
+        let end_page = VirtAddr::new(end - 1).floor();
+        loop {
+            let (_, perms, _) = self
+                .page_table
+                .leaf_info(page)
+                .ok_or(MemoryError::AreaNotFound)?;
+            if !perms.contains(MapPermission::USER)
+                || !(perms.contains(MapPermission::WRITE) || self.cow_pages.contains(&page))
+            {
+                return Err(MemoryError::AreaNotFound);
+            }
+            if page == end_page {
+                break;
+            }
+            page = page.checked_add(1)?;
+        }
+        // 分配失败也不能产生半写：先把所有 COW 页解除，再复制任何字节。
+        let mut page = VirtAddr::new(dst).floor();
+        loop {
+            self.handle_cow_store(page)?;
+            if page == end_page {
+                break;
+            }
+            page = page.checked_add(1)?;
+        }
+        Ok(())
     }
 
     /// 内核映像身份映射（代码/rodata/data/bss/boot 栈/空闲 RAM/必需 MMIO）。
@@ -566,4 +694,168 @@ impl Drop for MemorySet {
         }
         assert!(!cleanup_failed, "MemorySet cleanup found a missing mapping");
     }
+}
+
+/// 启动自检：仅操作未激活的临时页表，不影响当前内核地址空间。
+/// 验证跨架构 PTE 权限编解码、Framed 数据页 owner 与撤销后的资源回收。
+pub(crate) fn self_test() {
+    let baseline = frame_allocator::allocated_count();
+    let start = VirtAddr::new(0x4000_0000);
+    let next = VirtAddr::new(0x4000_1000);
+    let end = VirtAddr::new(0x4000_2000);
+    let area = MapArea::new(
+        AddressRange::new(start, end).expect("MemorySet self-test range"),
+        MapType::Framed,
+        MapPermission::READ | MapPermission::WRITE | MapPermission::USER,
+    )
+    .expect("MemorySet self-test area");
+    {
+        let mut space = MemorySet::new_bare().expect("MemorySet self-test root");
+        space.insert(area).expect("MemorySet self-test map");
+        assert_eq!(space.area_count(), 1);
+        let first = space
+            .translate(start)
+            .expect("MemorySet self-test first PTE");
+        let second = space
+            .translate(next)
+            .expect("MemorySet self-test second PTE");
+        assert_ne!(first, second, "MemorySet mapped two VPNs to one frame");
+        for address in [start, next] {
+            let (_, permissions, memory_type) = space
+                .page_table
+                .leaf_info(address.floor())
+                .expect("MemorySet self-test leaf info");
+            assert_eq!(
+                permissions,
+                MapPermission::READ | MapPermission::WRITE | MapPermission::USER
+            );
+            assert_eq!(memory_type, MemoryType::Normal);
+        }
+        assert_eq!(space.insert(area), Err(MemoryError::Overlap));
+        space.remove(start).expect("MemorySet self-test unmap");
+        assert_eq!(space.area_count(), 0);
+        assert!(space.translate(start).is_none());
+        assert!(space.translate(next).is_none());
+        assert_eq!(space.remove(start), Err(MemoryError::AreaNotFound));
+    }
+    assert_eq!(
+        frame_allocator::allocated_count(),
+        baseline,
+        "MemorySet self-test leaked frames"
+    );
+    crate::log_info!("M3-MEMORYSET-PASS");
+}
+
+/// M2.8 定向自检：逐个物理帧分配点注入一次 OOM，验证 COW fork 原子性与释放。
+/// 独立测试地址空间不进入调度器，运行时只占用 bootstrap hart。
+#[cfg(all(feature = "m28-frame-fault-test", feature = "arch-riscv64"))]
+pub(crate) fn test_cow_allocation_failures() {
+    fn fixture(layout: KernelImageLayout, memory_end: VirtAddr) -> MemorySet {
+        let mut space = MemorySet::new_kernel(layout, memory_end).expect("OOM fixture kernel map");
+        let areas = [
+            (
+                0x10000,
+                0x11000,
+                MapPermission::READ | MapPermission::EXECUTE | MapPermission::USER,
+            ),
+            (
+                0x11000,
+                0x13000,
+                MapPermission::READ | MapPermission::WRITE | MapPermission::USER,
+            ),
+            (
+                0x7efff000,
+                0x7f000000,
+                MapPermission::READ | MapPermission::WRITE | MapPermission::USER,
+            ),
+        ];
+        for (start, end, permissions) in areas {
+            let range = AddressRange::new(VirtAddr::new(start), VirtAddr::new(end)).unwrap();
+            space
+                .insert(MapArea::new(range, MapType::Framed, permissions).unwrap())
+                .expect("OOM fixture user map");
+        }
+        space
+    }
+
+    let layout = KernelImageLayout::current();
+    let (_, physical_end) =
+        crate::arch::mm::physical_memory_range(crate::kernel::mm::configured_memory_bytes())
+            .expect("OOM fixture physical range");
+    let memory_end = VirtAddr::new(physical_end);
+    let baseline_frames = frame_allocator::allocated_count();
+    let baseline_refs = frame_allocator::test_shared_ref_entries();
+
+    // 正常复制的实际分配次数决定完整故障点范围，不依赖页表布局常数。
+    let mut parent = fixture(layout, memory_end);
+    frame_allocator::set_test_failure_budget(None);
+    let child = parent
+        .dup_cow(layout, memory_end)
+        .expect("OOM fixture control fork");
+    let allocation_points = frame_allocator::test_allocation_attempts();
+    assert!(allocation_points > 0);
+    drop(child);
+    drop(parent);
+    assert_eq!(frame_allocator::allocated_count(), baseline_frames);
+    assert_eq!(frame_allocator::test_shared_ref_entries(), baseline_refs);
+
+    let sample_vpns =
+        [0x10000, 0x11000, 0x12000, 0x7efff000].map(|address| VirtAddr::new(address).floor());
+    for budget in 0..allocation_points {
+        let mut parent = fixture(layout, memory_end);
+        let before = sample_vpns.map(|vpn| parent.page_table.leaf_info(vpn).unwrap());
+        let frames_with_parent = frame_allocator::allocated_count();
+        frame_allocator::set_test_failure_budget(Some(budget));
+        let failed = parent.dup_cow(layout, memory_end).is_err();
+        assert!(
+            failed,
+            "COW fork succeeded at injected allocation point {}",
+            budget
+        );
+        assert_eq!(frame_allocator::test_allocation_attempts(), budget + 1);
+        assert_eq!(
+            frame_allocator::allocated_count(),
+            frames_with_parent,
+            "COW fork leaked frames at allocation point {}",
+            budget
+        );
+        assert!(
+            parent.cow_pages.is_empty(),
+            "failed fork changed parent COW set"
+        );
+        for (vpn, expected) in sample_vpns.into_iter().zip(before) {
+            assert_eq!(
+                parent.page_table.leaf_info(vpn).unwrap(),
+                expected,
+                "failed fork changed parent leaf at allocation point {}",
+                budget
+            );
+        }
+        drop(parent);
+        assert_eq!(frame_allocator::allocated_count(), baseline_frames);
+        assert_eq!(frame_allocator::test_shared_ref_entries(), baseline_refs);
+    }
+    crate::log_info!("M28-FRAME-OOM-PASS points={}", allocation_points);
+
+    // 第二个跨页 COW 分配失败时，第一页面映射可以提前私有化，用户字节不能半写。
+    let mut parent = fixture(layout, memory_end);
+    let child = parent
+        .dup_cow(layout, memory_end)
+        .expect("COW write fixture fork");
+    let dst = 0x11fff;
+    frame_allocator::set_test_failure_budget(Some(1));
+    assert!(parent.copy_to_user(dst, &[0x5a, 0xa5]).is_err());
+    assert_eq!(frame_allocator::test_allocation_attempts(), 2);
+    assert_eq!(parent.copy_from_user(dst, 2).unwrap(), [0, 0]);
+    assert_eq!(child.copy_from_user(dst, 2).unwrap(), [0, 0]);
+    parent
+        .copy_to_user(dst, &[0x5a, 0xa5])
+        .expect("COW write retry");
+    assert_eq!(parent.copy_from_user(dst, 2).unwrap(), [0x5a, 0xa5]);
+    assert_eq!(child.copy_from_user(dst, 2).unwrap(), [0, 0]);
+    drop(child);
+    drop(parent);
+    assert_eq!(frame_allocator::allocated_count(), baseline_frames);
+    assert_eq!(frame_allocator::test_shared_ref_entries(), baseline_refs);
+    crate::log_info!("M28-COW-WRITE-OOM-PASS");
 }

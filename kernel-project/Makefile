@@ -38,7 +38,7 @@ $(error 编排错误：配置/清理目标不能与构建目标同条命令。�
 endif
 endif
 
-DEFAULT_PHONY := all defconfig alldefconfig menuconfig check build run gdb test fmt fmt-check clean user user-fault build-fault test-fault run-shell build-shell
+DEFAULT_PHONY := all defconfig alldefconfig menuconfig check build run gdb test fmt fmt-check clean user user-fault build-fault test-fault run-shell build-shell test-shell build-console test-console build-vfs test-vfs test-process build-cow-oom test-cow-oom
 .PHONY: $(DEFAULT_PHONY)
 
 all:
@@ -83,6 +83,9 @@ USER_ELF2 := build/user/uapp2.elf
 USER_SHELL_ELF := build/user/shell.elf
 # G6：COW 验收程序（uapp-cow 模式 task0）。
 USER_COW_ELF := build/user/uapp-cow.elf
+USER_CONSOLE_ELF := build/user/uapp-console.elf
+USER_VFS_ELF := build/user/uapp-vfs.elf
+USER_VFS_EXEC_ELF := build/user/vfs-exec.elf
 # user crate 的 .cargo/config.toml 不会被 --manifest-path 模式发现（cargo 从 CWD 找配置），
 # 因此 target 与链接脚本在此显式声明。
 # -T 必须用 $(CURDIR) 绝对路径：rustc 链接时工作目录会切到临时目录，相对路径找不到脚本。
@@ -97,6 +100,9 @@ user:
 	@cp user/target/riscv64gc-unknown-none-elf/release/uapp2 $(USER_ELF2)
 	@cp user/target/riscv64gc-unknown-none-elf/release/shell $(USER_SHELL_ELF)
 	@cp user/target/riscv64gc-unknown-none-elf/release/uapp-cow $(USER_COW_ELF)
+	@cp user/target/riscv64gc-unknown-none-elf/release/uapp-console $(USER_CONSOLE_ELF)
+	@cp user/target/riscv64gc-unknown-none-elf/release/uapp-vfs $(USER_VFS_ELF)
+	@cp user/target/riscv64gc-unknown-none-elf/release/vfs-exec $(USER_VFS_EXEC_ELF)
 	@echo "用户程序：$(USER_ELF) $(USER_ELF2) $(USER_SHELL_ELF)"
 
 ## W2 附加用例：fault 模式用户程序（make test-fault 专用）--------------------------
@@ -141,6 +147,10 @@ build-shell: user
 	@$(PYTHON) tools/check-image.py $(KERNEL_ELF) $(LINK_BASE) $(ARCH)
 	@echo "产物：$(KERNEL_ELF)（uapp-shell 模式）"
 
+# G5 shell 的有界回归入口：运行器命中完成标记后回收 QEMU，完整断言见 serial.log。
+test-shell: build-shell
+	$(PYTHON) tools/run_qemu.py --qemu $(QEMU_BIN) --flags "$(QEMU_FLAGS)" --arch riscv64 --mode boot --timeout 60 --pattern "shell: done" --run-id shell-$(RUN_ID) --elf $(KERNEL_ELF)
+
 # G6 COW 验收：与 build 同构，但 kernel 侧多开 uapp-cow feature（task0 = uapp-cow.elf）。
 build-cow: user
 	@mkdir -p $(BUILD_DIR)
@@ -150,7 +160,51 @@ build-cow: user
 	@echo "产物：$(KERNEL_ELF)（uapp-cow 模式）"
 
 run-cow: build-cow
-	$(PYTHON) tools/run_qemu.py --qemu $(QEMU_BIN) --flags "$(QEMU_FLAGS)" --arch riscv64 --mode boot --timeout 60 --pattern "C5" --run-id $(RUN_ID) --elf $(KERNEL_ELF)
+	$(PYTHON) tools/run_qemu.py --qemu $(QEMU_BIN) --flags "$(QEMU_FLAGS)" --arch riscv64 --mode boot --timeout 60 --pattern "G6-COW-PASS" --run-id $(RUN_ID) --elf $(KERNEL_ELF)
+	$(PYTHON) tools/check_cow_reclaim.py artifacts/runs/$(RUN_ID)/serial.log
+
+# M2.8：启动自检遍历 COW fork 的全部物理帧分配点，再执行原有用户态 COW 用例。
+build-cow-oom: user
+	@mkdir -p $(BUILD_DIR)
+	$(CARGO) build --target $(RUST_TARGET) --features $(RUST_FEATURES),uapp-cow,m28-frame-fault-test $(CARGO_PROFILE_FLAG)
+	@cp $(CARGO_OUT_DIR)/$(KERNEL_NAME) $(KERNEL_ELF)
+	@$(PYTHON) tools/check-image.py $(KERNEL_ELF) $(LINK_BASE) $(ARCH)
+
+test-cow-oom: build-cow-oom
+	$(PYTHON) tools/run_qemu.py --qemu $(QEMU_BIN) --flags "$(QEMU_FLAGS)" --arch riscv64 --mode boot --timeout 60 --pattern "G6-COW-PASS" --run-id oom-$(RUN_ID) --elf $(KERNEL_ELF)
+	$(PYTHON) tools/check_cow_reclaim.py artifacts/runs/oom-$(RUN_ID)/serial.log
+	$(PYTHON) tools/check_cow_oom.py artifacts/runs/oom-$(RUN_ID)/serial.log
+
+# M2.5 控制台输入验收：内核确认读任务阻塞后注入固定串口字节。
+build-console: user
+	@mkdir -p $(BUILD_DIR)
+	$(CARGO) build --target $(RUST_TARGET) --features $(RUST_FEATURES),uapp-console $(CARGO_PROFILE_FLAG)
+	@cp $(CARGO_OUT_DIR)/$(KERNEL_NAME) $(KERNEL_ELF)
+	@$(PYTHON) tools/check-image.py $(KERNEL_ELF) $(LINK_BASE) $(ARCH)
+
+test-console: build-console
+	$(PYTHON) tools/run_qemu.py --qemu $(QEMU_BIN) --flags "$(QEMU_FLAGS)" --arch riscv64 \
+		--mode boot --timeout $(CONSOLE_TIMEOUT) --pattern "INPUT_PASS" --run-id console-$(RUN_ID) \
+		--stdin-file $(CONSOLE_FIXTURE) --stdin-after "\\[sched\\] idle waiting for console input" --elf $(KERNEL_ELF)
+
+CONSOLE_FIXTURE ?= tools/fixtures/console-two-lines.txt
+CONSOLE_TIMEOUT ?= 60
+
+# M2.5 VFS：用户态创建目录/文件、共享游标、错误路径及子目录 ELF exec。
+build-vfs: user
+	@mkdir -p $(BUILD_DIR)
+	$(CARGO) build --target $(RUST_TARGET) --features $(RUST_FEATURES),uapp-vfs $(CARGO_PROFILE_FLAG)
+	@cp $(CARGO_OUT_DIR)/$(KERNEL_NAME) $(KERNEL_ELF)
+	@$(PYTHON) tools/check-image.py $(KERNEL_ELF) $(LINK_BASE) $(ARCH)
+
+test-vfs: build-vfs
+	$(PYTHON) tools/run_qemu.py --qemu $(QEMU_BIN) --flags "$(QEMU_FLAGS)" --arch $(ARCH) \
+		--mode boot --timeout 60 --pattern "VFS_PASS" --run-id vfs-$(RUN_ID) --elf $(KERNEL_ELF)
+
+# 默认用户程序完整走完 G4/G5；不能只用 M1 启动标记代替文件/进程回归。
+test-process: build
+	$(PYTHON) tools/run_qemu.py --qemu $(QEMU_BIN) --flags "$(QEMU_FLAGS)" --arch $(ARCH) \
+		--mode boot --timeout 60 --pattern "\\[exit\\] task 0 exited with code 7" --run-id process-$(RUN_ID) --elf $(KERNEL_ELF)
 
 # G5 shell 实机演示（V2 §9：固定输入脚本 /cmds.txt + ready 标记）。
 run-shell: build-shell

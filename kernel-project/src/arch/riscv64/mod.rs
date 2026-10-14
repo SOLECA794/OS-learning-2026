@@ -2,7 +2,9 @@
 
 pub mod boot;
 pub mod console;
+pub mod interrupt;
 pub mod mm;
+mod platform;
 pub mod power;
 pub mod task;
 pub mod timer;

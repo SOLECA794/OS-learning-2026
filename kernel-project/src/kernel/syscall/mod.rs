@@ -4,8 +4,7 @@
 //! errno 与具体语义由各分类模块负责。未知系统调用属于用户输入错误，必须返回 ENOSYS，
 //! 不能 panic 使整个内核停止。
 //!
-//! M1.5 新增 write/exit（用户态首闭环）；用户指针经 `copy_from_user` 段边界校验，
-//! 非法指针返回 EFAULT（受控，不 panic）。
+//! 用户数据经 `copy_from_user` 逐页校验后复制到内核缓冲；非法指针返回 EFAULT。
 
 pub const SYSCALL_REBOOT: usize = 142;
 pub const SYSCALL_WRITE: usize = 64;
@@ -14,9 +13,14 @@ pub const SYSCALL_FORK: usize = 220;
 pub const SYSCALL_WAIT4: usize = 260;
 pub const SYSCALL_EXECVE: usize = 221;
 pub const SYSCALL_DUP: usize = 23;
+pub const SYSCALL_MKDIRAT: usize = 34;
 pub const SYSCALL_OPENAT: usize = 56;
 pub const SYSCALL_CLOSE: usize = 57;
 pub const SYSCALL_READ: usize = 63;
+pub const SYSCALL_LSEEK: usize = 62;
+pub const SYSCALL_PREAD64: usize = 67;
+pub const SYSCALL_PWRITE64: usize = 68;
+pub const SYSCALL_FSTAT: usize = 80;
 pub const SYSCALL_GETDENTS64: usize = 217;
 
 #[cfg(feature = "arch-riscv64")]
@@ -51,9 +55,19 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
         #[cfg(feature = "arch-riscv64")]
         SYSCALL_READ => fd::sys_read(args[0], args[1], args[2]),
         #[cfg(feature = "arch-riscv64")]
+        SYSCALL_LSEEK => fd::sys_lseek(args[0], args[1] as i64, args[2]),
+        #[cfg(feature = "arch-riscv64")]
+        SYSCALL_PREAD64 => fd::sys_pread64(args[0], args[1], args[2], args[3] as i64),
+        #[cfg(feature = "arch-riscv64")]
+        SYSCALL_PWRITE64 => fd::sys_pwrite64(args[0], args[1], args[2], args[3] as i64),
+        #[cfg(feature = "arch-riscv64")]
+        SYSCALL_FSTAT => fd::sys_fstat(args[0], args[1]),
+        #[cfg(feature = "arch-riscv64")]
         SYSCALL_CLOSE => fd::sys_close(args[0]),
         #[cfg(feature = "arch-riscv64")]
-        SYSCALL_OPENAT => fd::sys_openat(args[0], args[1], args[2]),
+        SYSCALL_OPENAT => fd::sys_openat(args[0], args[1], args[2], args[3]),
+        #[cfg(feature = "arch-riscv64")]
+        SYSCALL_MKDIRAT => fd::sys_mkdirat(args[0], args[1], args[2]),
         #[cfg(feature = "arch-riscv64")]
         SYSCALL_DUP => fd::sys_dup(args[0]),
         #[cfg(feature = "arch-riscv64")]
@@ -74,64 +88,82 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
     }
 }
 
-/// 校验用户指针区间并返回只读视图。
-///
-/// 当前激活页表含用户段映射，且 trap 处理期间 sstatus.SUM=1（见 entry 汇编），
-/// 因此 S-mode 可直接解引用用户页。M1.5 以段边界校验为准（单任务、无 fork），
-/// M1.6 换为逐页 PTE 权限查询（boundary M1.5 §4 已登记）。
-pub(crate) fn copy_from_user(src: usize, len: usize) -> Result<&'static [u8], isize> {
+/// 校验用户地址区间和逐页 PTE，并返回由内核拥有的数据副本。
+/// 不延长用户页引用生命周期；exec/fork/exit 后副本仍独立有效。
+#[cfg(feature = "arch-riscv64")]
+pub(crate) fn copy_from_user(src: usize, len: usize) -> Result<alloc::vec::Vec<u8>, isize> {
     if len == 0 {
-        return Ok(&[]);
+        return Ok(alloc::vec::Vec::new());
     }
     let end = src.checked_add(len).ok_or(EFAULT)?;
     if src < USER_TEXT_BASE || end > USER_STACK_TOP {
         return Err(EFAULT);
     }
-    // SAFETY: 边界已校验；当前单任务、无回收，'static 延长安全（登记见 boundary）。
-    Ok(unsafe { core::slice::from_raw_parts(src as *const u8, len) })
+    crate::kernel::task::with_current_space(|space| space.copy_from_user(src, len))
+        .ok_or(EFAULT)?
+        .map_err(|_| EFAULT)
 }
 
 /// 从用户内存拷一个 null 终止字符串（有界）。
 ///
-/// 不能一次拷满 max_len：字符串可能位于用户栈顶附近，src+max_len 会越出
-/// USER_STACK_TOP（G5 F1 实机发现）。按「可用区间 = min(max_len, STACK_TOP-src)」
-/// 一次段校验；区间内无 null 视为超长 → EFAULT。
+/// 逐页读取直到 null，避免字符串在当前页已结束时误触碰下一张未映射页。
+/// 单次片段仍使用 `copy_from_user` 的地址及 PTE 检查。
+#[cfg(feature = "arch-riscv64")]
 pub(crate) fn copy_cstring_from_user(
     src: usize,
     max_len: usize,
 ) -> Result<alloc::vec::Vec<u8>, isize> {
-    let avail = USER_STACK_TOP.saturating_sub(src).min(max_len);
-    let buf = copy_from_user(src, avail)?;
-    let end = buf.iter().position(|&b| b == 0).ok_or(EFAULT)?;
-    Ok(buf[..end].to_vec())
+    let mut bytes = alloc::vec::Vec::new();
+    while bytes.len() < max_len {
+        let addr = src.checked_add(bytes.len()).ok_or(EFAULT)?;
+        let page_left = crate::kernel::mm::address::PAGE_SIZE
+            - (addr & (crate::kernel::mm::address::PAGE_SIZE - 1));
+        let n = page_left.min(max_len - bytes.len());
+        let part = copy_from_user(addr, n)?;
+        if let Some(end) = part.iter().position(|&b| b == 0) {
+            bytes.extend_from_slice(&part[..end]);
+            return Ok(bytes);
+        }
+        bytes.extend_from_slice(&part);
+    }
+    Err(EFAULT)
 }
-/// 向用户内存写一个 usize（wait status 等）。段边界校验同 copy_from_user；
-/// SUM=1 处理期内核可直接写用户页。
-fn copy_to_user(dst: usize, value: usize) -> Result<(), isize> {
-    let end = dst
-        .checked_add(core::mem::size_of::<usize>())
-        .ok_or(EFAULT)?;
+/// 向用户地址空间写字节：映射权限与 COW 由 MemorySet 统一判定。
+#[cfg(feature = "arch-riscv64")]
+pub(crate) fn copy_bytes_to_user(dst: usize, data: &[u8]) -> Result<(), isize> {
+    if data.is_empty() {
+        return Ok(());
+    }
+    let end = dst.checked_add(data.len()).ok_or(EFAULT)?;
     if dst < USER_TEXT_BASE || end > USER_STACK_TOP {
         return Err(EFAULT);
     }
-    // SAFETY: 边界已校验且当前激活页表含用户段映射（SUM=1）。
-    unsafe { (dst as *mut usize).write(value) };
-    Ok(())
+    crate::kernel::task::with_current_space(|space| space.copy_to_user(dst, data))
+        .ok_or(EFAULT)?
+        .map_err(|_| EFAULT)
 }
 
-/// wait4(pid, wstatus, options)：阻塞循环——子已退出则回收并写 status（WEXITSTATUS 编码），
+/// 写回 Linux `int` 宽度的 wait status；按字节复制，不形成未对齐用户引用。
+#[cfg(feature = "arch-riscv64")]
+fn copy_wait_status_to_user(dst: usize, value: i32) -> Result<(), isize> {
+    copy_bytes_to_user(dst, &value.to_ne_bytes())
+}
+
+/// wait4(pid, wstatus, options)：阻塞循环——子已退出则先写 status，再提交回收；
+/// 写回失败保留僵尸供重试。wstatus 按 Linux `int` 写入 4 字节。
 /// 未退出则 Waiting 阻塞（子 exit 唤醒后重查），无子返回 ECHILD，WNOHANG 时不阻塞返回 0。
 #[cfg(feature = "arch-riscv64")]
 fn sys_wait4(pid: usize, status_ptr: usize, options: usize) -> isize {
     loop {
         match crate::kernel::task::wait4_step(pid as isize) {
-            crate::kernel::task::WaitResult::Reaped { pid, exit_code } => {
+            crate::kernel::task::WaitResult::Exited { pid, exit_code } => {
                 if status_ptr != 0 {
-                    let status = ((exit_code & 0xff) as usize) << 8;
-                    if copy_to_user(status_ptr, status).is_err() {
+                    let status = (exit_code & 0xff) << 8;
+                    if copy_wait_status_to_user(status_ptr, status).is_err() {
                         return EFAULT;
                     }
                 }
+                crate::kernel::task::reap_child(pid);
                 return pid as isize;
             }
             crate::kernel::task::WaitResult::WouldBlock => {

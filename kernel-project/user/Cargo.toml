@@ -20,3 +20,12 @@ path = "src/bin/shell.rs"
 [[bin]]
 name = "uapp-cow"
 path = "src/bin/uapp-cow.rs"
+[[bin]]
+name = "uapp-console"
+path = "src/bin/uapp-console.rs"
+[[bin]]
+name = "uapp-vfs"
+path = "src/bin/uapp-vfs.rs"
+[[bin]]
+name = "vfs-exec"
+path = "src/bin/vfs-exec.rs"

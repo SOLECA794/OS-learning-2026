@@ -45,10 +45,22 @@ fn handle_trap(context: &mut crate::arch::TrapContext) {
         }
         #[cfg(feature = "arch-riscv64")]
         TrapCause::Interrupt { code } if code == 5 => {
-            // S 态时钟中断（STI）：重设下一次触发后进入调度（先用户态抢占）。
-            // 内核态不抢占：handler 期间 sstatus.SIE=0，不会在此路径嵌套。
+            // S 态时钟中断（STI）：用户态抢占；内核态 idle 只重设定时器，
+            // 不在内核栈上的阻塞调度路径再次调用 schedule。
             crate::arch::timer::set_next_trigger();
-            crate::kernel::task::schedule();
+            if context.is_from_user() {
+                crate::kernel::task::schedule();
+            }
+        }
+        #[cfg(feature = "arch-riscv64")]
+        TrapCause::Interrupt { code } if code == 9 => {
+            // S 态外部中断（SEI）：目前仅接受 QEMU UART0 RX。
+            if !crate::arch::interrupt::handle_external() {
+                fatal_trap(context, cause, "unknown external interrupt")
+            }
+            if crate::arch::console::has_input() {
+                crate::kernel::task::wake_console_readers();
+            }
         }
         TrapCause::Interrupt { .. } => fatal_trap(context, cause, "unhandled interrupt"),
         TrapCause::Breakpoint => {

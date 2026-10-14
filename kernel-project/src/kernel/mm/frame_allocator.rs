@@ -220,7 +220,7 @@ impl FrameAllocator {
         self.allocated -= pages;
 
         // 找插入位置：`cur` 是第一个起始页号 >= 待插入段尾部的块；`prev` 是其前驱。
-        let mut start = ppn;
+        let start = ppn;
         let mut size = pages;
         let mut prev: Option<usize> = None;
         let mut cur = self.blocks;
@@ -228,6 +228,10 @@ impl FrameAllocator {
             if b >= start + size {
                 break;
             }
+            assert!(
+                b + self.block_size(b) <= start,
+                "physical frame free overlap"
+            );
             prev = Some(b);
             cur = self.block_next(b);
         }
@@ -266,6 +270,48 @@ static FRAME_ALLOCATOR: SpinLock<FrameAllocator> = SpinLock::new(FrameAllocator:
 /// deallocate，其余释放路径只减计数。
 static FRAME_REFS: SpinLock<BTreeMap<usize, usize>> = SpinLock::new(BTreeMap::new());
 
+/// M2.8 测试构建专用：在成功分配指定次数后，让下一次物理帧申请失败一次。
+/// 只在单核启动自检期间启用；生产构建没有此状态或分支。
+#[cfg(feature = "m28-frame-fault-test")]
+static FAULT_INJECTION: SpinLock<(Option<usize>, usize)> = SpinLock::new((None, 0));
+
+#[cfg(feature = "m28-frame-fault-test")]
+fn reject_test_allocation() -> bool {
+    let mut state = FAULT_INJECTION.lock();
+    state.1 += 1;
+    match state.0 {
+        Some(0) => {
+            state.0 = None;
+            true
+        }
+        Some(left) => {
+            state.0 = Some(left - 1);
+            false
+        }
+        None => false,
+    }
+}
+
+/// 仅供启动自检设置一次性故障；None 表示只统计尝试次数。
+#[cfg(feature = "m28-frame-fault-test")]
+pub(crate) fn set_test_failure_budget(budget: Option<usize>) {
+    *FAULT_INJECTION.lock() = (budget, 0);
+}
+
+/// 返回本轮分配尝试次数，失败后 budget 必须已自动撤销。
+#[cfg(feature = "m28-frame-fault-test")]
+pub(crate) fn test_allocation_attempts() -> usize {
+    let state = FAULT_INJECTION.lock();
+    assert!(state.0.is_none(), "frame fault injection was not consumed");
+    state.1
+}
+
+/// 仅自检使用：检查共享引用登记没有残留；不会参与分配行为。
+#[cfg(feature = "m28-frame-fault-test")]
+pub(crate) fn test_shared_ref_entries() -> usize {
+    FRAME_REFS.lock().len()
+}
+
 /// 初始化全局页帧分配器管理的物理页范围。
 pub fn init(start: PhysPageNum, end: PhysPageNum) -> Result<(), FrameAllocError> {
     FRAME_ALLOCATOR.lock().init(start, end)
@@ -273,6 +319,10 @@ pub fn init(start: PhysPageNum, end: PhysPageNum) -> Result<(), FrameAllocError>
 
 /// 分配并清零一个页面，返回其唯一所有权令牌。
 pub fn allocate() -> Result<FrameTracker, FrameAllocError> {
+    #[cfg(feature = "m28-frame-fault-test")]
+    if reject_test_allocation() {
+        return Err(FrameAllocError::OutOfMemory);
+    }
     let ppn = FRAME_ALLOCATOR.lock().allocate()?;
     let address = crate::arch::mm::phys_to_virt(ppn.start_address().value()) as *mut u8;
     // SAFETY: 刚分配出的页由返回的 FrameTracker 独占，且范围正好是一页。
@@ -282,6 +332,10 @@ pub fn allocate() -> Result<FrameTracker, FrameAllocError> {
 
 /// 分配并清零指定数量的连续页面。
 pub fn allocate_contiguous(pages: usize) -> Result<FrameBlock, FrameAllocError> {
+    #[cfg(feature = "m28-frame-fault-test")]
+    if reject_test_allocation() {
+        return Err(FrameAllocError::OutOfMemory);
+    }
     let start = FRAME_ALLOCATOR.lock().allocate_contiguous(pages)?;
     let address = crate::arch::mm::phys_to_virt(start.start_address().value()) as *mut u8;
     let bytes = pages
@@ -304,6 +358,43 @@ pub fn allocated_count() -> usize {
 pub fn bump_watermark() -> usize {
     let lock = FRAME_ALLOCATOR.lock();
     lock.next - lock.start
+}
+
+/// 启动自检：相邻块回收必须合并，重新分配必须复用，重用页必须清零。
+/// 在 mm::init 中只执行一次；失败即停在 M1 成功标记之前。
+pub fn self_test() {
+    let baseline = allocated_count();
+    let block = allocate_contiguous(5).expect("frame self-test block");
+    let (first, second) = block.split_at(2);
+    let start = first.start();
+    let watermark = bump_watermark();
+    // 先归还后块再归还前块，验证链表的相邻合并。
+    drop(second);
+    drop(first);
+    let merged = allocate_contiguous(5).expect("frame self-test merged block");
+    assert_eq!(merged.start(), start, "frame self-test did not reuse range");
+    assert_eq!(bump_watermark(), watermark, "frame self-test advanced bump");
+    drop(merged);
+
+    let page = allocate().expect("frame self-test page");
+    let address = crate::arch::mm::phys_to_virt(page.ppn().start_address().value()) as *mut u8;
+    // SAFETY: page 独占此物理页，写入首末字节不会跨页。
+    unsafe {
+        address.write_volatile(0xa5);
+        address.add(PAGE_SIZE - 1).write_volatile(0x5a);
+    }
+    let ppn = page.ppn();
+    drop(page);
+    let reused = allocate().expect("frame self-test reused page");
+    assert_eq!(reused.ppn(), ppn, "frame self-test page was not reused");
+    // SAFETY: reused 再次独占该页；allocate 已承诺清零整页。
+    unsafe {
+        assert_eq!(address.read_volatile(), 0);
+        assert_eq!(address.add(PAGE_SIZE - 1).read_volatile(), 0);
+    }
+    drop(reused);
+    assert_eq!(allocated_count(), baseline, "frame self-test leaked pages");
+    crate::log_info!("M3-FRAME-REUSE-PASS");
 }
 
 /// 不经过 RAII 令牌直接归还页面，供页表和映射区析构路径使用。
@@ -404,6 +495,22 @@ impl FrameBlock {
     /// 返回连续范围包含的页面数量。
     pub const fn pages(&self) -> usize {
         self.pages
+    }
+
+    /// 把同一独占范围拆成两个相邻令牌，供回收合并自检使用。
+    fn split_at(self, first_pages: usize) -> (Self, Self) {
+        assert!(first_pages > 0 && first_pages < self.pages);
+        let block = ManuallyDrop::new(self);
+        (
+            Self {
+                start: block.start,
+                pages: first_pages,
+            },
+            Self {
+                start: PhysPageNum::new(block.start.value() + first_pages),
+                pages: block.pages - first_pages,
+            },
+        )
     }
 }
 

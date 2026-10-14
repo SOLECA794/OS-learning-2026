@@ -65,6 +65,8 @@ pub(crate) fn init() {
     crate::log_info!("mm: kernel page table active");
     heap_allocator::init().expect("kernel heap initialization failed");
     heap_allocator::self_test();
+    memory_set::self_test();
+    frame_allocator::self_test();
     let stats = heap_allocator::stats();
     crate::log_info!(
         "mm: kernel heap active size={} free={} allocations={}",

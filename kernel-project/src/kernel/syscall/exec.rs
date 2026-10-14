@@ -20,7 +20,6 @@ const MAX_ARG_LEN: usize = 256;
 /// execve 路径最大长度。
 const MAX_PATH_LEN: usize = 128;
 
-const ENOENT: isize = -2;
 const ENOEXEC: isize = -8;
 const EFAULT: isize = -14;
 const ENOMEM: isize = -12;
@@ -90,9 +89,8 @@ fn build_user_argv_stack(
 /// 失败返回 Err(errno)，旧进程（地址空间与现场）原样保留。
 pub fn sys_execve(context: &mut arch::trap::TrapContext, args: [usize; 6]) -> Result<(), isize> {
     let path_bytes = super::copy_cstring_from_user(args[0], MAX_PATH_LEN)?;
-    let path = core::str::from_utf8(&path_bytes).map_err(|_| ENOENT)?;
-    // G5：程序源权威迁至 ramfs（boot 时从 programs 表装载）。
-    let elf_bytes = crate::kernel::fs::ramfs::read_file_by_path(path)?;
+    // exec 与文件打开共用 VFS 路径解析；错误返回时旧地址空间保持不变。
+    let elf_bytes = crate::fs::read_file(&path_bytes)?;
     let elf = elf::parse(&elf_bytes).map_err(|_| ENOEXEC)?;
 
     // 用户参数：argv 数组（args[1]）；envp（args[2]）忽略。

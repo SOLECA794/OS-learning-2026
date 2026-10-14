@@ -92,7 +92,7 @@ pub const fn phys_to_virt(physical_address: usize) -> usize {
 }
 
 pub const fn kernel_device_ranges() -> &'static [(usize, usize)] {
-    &[]
+    super::platform::qemu_virt::DEVICE_RANGES
 }
 
 /// 激活 Sv39 根页表并刷新本 hart 的全部 TLB。

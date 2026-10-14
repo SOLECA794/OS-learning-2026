@@ -22,6 +22,20 @@ src/kernel/syscall/
 4. **静默兼容纪律**：难以实现的 flag 可以静默兼容（用户观测效果不变），但必须：注释说明 ABI 取舍与移除条件 + 打日志保持可观测性。
 5. **用户指针安全**：所有用户数据经 uptr/ubuf 校验后访问，禁止直接解引用裸指针；copy-in/out 顺序与边界在 syscall 层统一。
 
+当前 RISC-V `wait4(260)` 已按 4 字节 `int` 写回退出状态；失败写回不消费僵尸。
+范围仅覆盖已有的退出码、指定子进程/任意子进程与 WNOHANG 子集；其余 Linux
+`wait4` 语义不由这个字段宽度切换推断。验收见 `../log/rfc/M3-wait4-status/index.md`。
+RISC-V `openat(56)` 已切换为 `(dirfd, path, flags, mode)`；绝对路径忽略 dirfd，
+相对路径接受 AT_FDCWD 或目录 fd。当前仅有 ramfs、固定根 cwd，mode 尚不参与
+权限检查，O_* 仅支持已实现子集。验收见 `../log/rfc/M3-openat-abi/index.md`。
+RISC-V `lseek(62)` 已支持 ramfs 普通文件与目录的 `SEEK_SET/CUR/END`，
+`dup`/`fork` 共享打开描述偏移；控制台不可 seek。验收见 `../log/rfc/M3-lseek/index.md`。
+RISC-V `pread64(67)` / `pwrite64(68)` 已支持 ramfs 普通文件定位 IO，不改变共享偏移；
+`O_APPEND` 下定位写仍追加。验收见 `../log/rfc/M3-positioned-io/index.md`。
+RISC-V `fstat(80)` 已按 64 位 asm-generic `struct stat` 布局写回 128 字节，
+当前可靠字段仅包括节点编号、类型、普通文件长度与逻辑块数；
+uid/gid、权限位和时间戳暂无模型。验收见 `../log/rfc/M3-fstat/index.md`。
+
 ## 4. 实现优先级（由测例分数驱动）
 
 优先序不是"感觉重要"，而是 **LTP 子测例计数**（TPASS 算一分）：

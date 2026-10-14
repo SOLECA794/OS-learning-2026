@@ -1,189 +1,326 @@
-//! FD 相关系统调用（RV，V2 §9：open/dup/close/read/write 合同）。
+//! FD 系统调用：校验用户参数，克隆任务的打开描述，再调用 VFS。
 //!
-//! 路径与缓冲均经 `copy_from_user` 段边界校验（非法指针 → EFAULT，受控）；
-//! 非法 fd → EBADF；读写权限与偏移唯一权威在 `OpenFileDesc`（ramfs 内容权威）。
-
-use alloc::sync::Arc;
-use core::sync::atomic::{AtomicUsize, Ordering};
+//! 不在 task 锁内进行文件 IO 或控制台等待。文件内容/偏移由 VFS 唯一管理，
+//! 用户地址写入前先准备目的页，避免 EFAULT 时已经消费文件或目录游标。
 
 use super::copy_cstring_from_user;
-use crate::kernel::fs::file::{FdEntry, FdTable, OpenFileDesc};
-use crate::kernel::fs::ramfs;
-use crate::kernel::task;
+use crate::fs::{self, OpenFileDesc};
+use crate::kernel::task::{self, fd_table::FdEntry};
+use alloc::sync::Arc;
 
 const EBADF: isize = -9;
 const EFAULT: isize = -14;
+const ENOTDIR: isize = -20;
 const EISDIR: isize = -21;
+const EINVAL: isize = -22;
+const ESPIPE: isize = -29;
+const AT_FDCWD: isize = -100;
 
-/// openat(2) 最小实现（RV ABI 无 open，用户程序用 openat=56）。
-/// 路径按「去前导 '/' 精确匹配」；支持 O_RDONLY/O_WRONLY/O_RDWR/O_CREAT/O_TRUNC。
-pub fn sys_openat(path_ptr: usize, flags: usize, _mode: usize) -> isize {
-    const O_WRONLY: usize = 1;
-    const O_RDWR: usize = 2;
-    let path = match copy_cstring_from_user(path_ptr, 128) {
-        Ok(p) => p,
-        Err(e) => return e,
-    };
-    if path.is_empty() {
-        return -2; // ENOENT（空路径）
+/// Linux O_* 在 ABI 边界转换为 VFS 领域选项，未知位在查路径前拒绝。
+fn open_options(flags: usize) -> Result<fs::OpenOptions, isize> {
+    const O_CREAT: usize = 0x40;
+    const O_EXCL: usize = 0x80;
+    const O_TRUNC: usize = 0x200;
+    const O_APPEND: usize = 0x400;
+    const O_DIRECTORY: usize = 0x10000;
+    if flags & 3 == 3 || flags & !(3 | O_CREAT | O_EXCL | O_TRUNC | O_APPEND | O_DIRECTORY) != 0 {
+        return Err(EINVAL);
     }
-    let entry = match ramfs::open(path, flags) {
-        Ok(e) => e,
-        Err(errno) => return errno,
-    };
-    // O_APPEND 未支持但被 open 校验拒绝；此处只需分发（flags 校验已在 ramfs::open）。
-    let _ = O_WRONLY;
-    let _ = O_RDWR;
-    task::with_current_fds(|fds: &mut FdTable| fds.alloc(entry))
-        .map(|fd| fd as isize)
-        .unwrap_or_else(|e| e)
+    if flags & (O_CREAT | O_DIRECTORY) == (O_CREAT | O_DIRECTORY) {
+        return Err(EINVAL);
+    }
+    Ok(fs::OpenOptions {
+        read: flags & 3 != 1,
+        write: flags & 3 != 0,
+        create: flags & O_CREAT != 0,
+        exclusive: flags & O_EXCL != 0,
+        truncate: flags & O_TRUNC != 0,
+        append: flags & O_APPEND != 0,
+        directory: flags & O_DIRECTORY != 0,
+    })
 }
 
-/// close(2)：关闭 fd；非法 fd → EBADF。
+/// Linux openat(dirfd, path, flags, mode)。当前无权限模型，mode 暂不实施；
+/// AT_FDCWD 暂映射到根目录，进程 cwd 落地后改用调用者的 cwd。
+pub fn sys_openat(dirfd: usize, path_ptr: usize, flags: usize, _mode: usize) -> isize {
+    let result = (|| {
+        let path = copy_cstring_from_user(path_ptr, fs::MAX_PATH_LEN)?;
+        let options = open_options(flags)?;
+        let base = directory_base(dirfd, &path)?;
+        let desc = fs::open_at(&path, options, base.as_deref())?;
+        task::with_current_fds(|fds| fds.alloc(FdEntry::File(desc)))
+    })();
+    result.map(|fd| fd as isize).unwrap_or_else(|e| e)
+}
+
+/// mkdirat(dirfd, path, mode)：绝对路径忽略 dirfd；相对路径从目录 fd 解析。
+/// 尚无权限模型，mode 暂不实施；引入 credentials/umask 时补齐权限语义。
+pub fn sys_mkdirat(dirfd: usize, path_ptr: usize, _mode: usize) -> isize {
+    let result = (|| {
+        let path = copy_cstring_from_user(path_ptr, fs::MAX_PATH_LEN)?;
+        let base = directory_base(dirfd, &path)?;
+        fs::mkdir_at(&path, base.as_deref())
+    })();
+    result.map(|_| 0).unwrap_or_else(|e| e)
+}
+
+/// 只从 fd 表取得打开描述；具体节点是否为目录由 VFS 统一判断。
+fn directory_base(dirfd: usize, path: &[u8]) -> Result<Option<Arc<OpenFileDesc>>, isize> {
+    if path.starts_with(b"/") || dirfd as isize == AT_FDCWD {
+        return Ok(None);
+    }
+    match entry(dirfd)? {
+        FdEntry::File(desc) => Ok(Some(desc)),
+        FdEntry::ConsoleInput | FdEntry::ConsoleOutput => Err(ENOTDIR),
+    }
+}
+
+fn entry(fd: usize) -> Result<FdEntry, isize> {
+    task::with_current_fds(|fds| fds.get(fd).cloned()).ok_or(EBADF)
+}
+
 pub fn sys_close(fd: usize) -> isize {
-    task::with_current_fds(|fds: &mut FdTable| fds.close(fd))
+    task::with_current_fds(|fds| fds.close(fd))
         .map(|_| 0)
         .unwrap_or_else(|e| e)
 }
 
-/// read(2)：fd=0 控制台返回 EOF(0)；文件按共享偏移读。
-pub fn sys_read(fd: usize, buf: usize, len: usize) -> isize {
-    // 取出描述（Arc clone），随后在 RAMFS 锁外做内容 IO。
-    let desc = task::with_current_fds(
-        |fds: &mut FdTable| -> Result<Option<Arc<OpenFileDesc>>, isize> {
-            match fds.get(fd) {
-                Some(FdEntry::File(d)) => Ok(Some(d.clone())),
-                Some(FdEntry::Dir(_)) => Err(EISDIR),
-                Some(FdEntry::Console) => Ok(None), // fd 0：EOF（控制台输入 G5 未实现）
-                None => Ok(None),
-            }
-        },
-    );
-    let desc = match desc {
-        Ok(Some(d)) => d,
+/// RISC-V asm-generic `struct stat`：128 字节。syscall 层独占此 UAPI 布局。
+/// 当前 ramfs 没有权限、属主或时间戳模型，因此只编码真实可得的类型/大小/编号。
+pub fn sys_fstat(fd: usize, stat_ptr: usize) -> isize {
+    let target = match entry(fd) {
+        Ok(target) => target,
         Err(e) => return e,
-        Ok(None) => {
-            // 区分"控制台 EOF(0)"与"非法 fd(EBADF)"：再次查询表项存在性。
-            let exists = task::with_current_fds(|fds: &mut FdTable| fds.get(fd).is_some());
-            return if exists { 0 } else { EBADF };
-        }
     };
+    const S_IFREG: u32 = 0o100000;
+    const S_IFDIR: u32 = 0o040000;
+    const S_IFCHR: u32 = 0o020000;
+    let (ino, mode, size) = match target {
+        FdEntry::File(desc) => {
+            let meta = desc.metadata();
+            let mode = match meta.file_type {
+                fs::FileType::Regular => S_IFREG,
+                fs::FileType::Directory => S_IFDIR,
+            };
+            (meta.inode_number, mode, meta.size)
+        }
+        FdEntry::ConsoleInput | FdEntry::ConsoleOutput => (0, S_IFCHR, 0),
+    };
+    if size > isize::MAX as usize {
+        return -75; // EOVERFLOW：st_size 是有符号 64 位。
+    }
+    let mut stat = [0u8; 128];
+    stat[8..16].copy_from_slice(&(ino as u64).to_ne_bytes());
+    stat[16..20].copy_from_slice(&mode.to_ne_bytes());
+    stat[20..24].copy_from_slice(&1u32.to_ne_bytes()); // st_nlink：当前无硬链接。
+    stat[48..56].copy_from_slice(&(size as i64).to_ne_bytes());
+    stat[56..60].copy_from_slice(&4096i32.to_ne_bytes()); // st_blksize：ramfs 页大小。
+    let blocks = size / 512 + usize::from(size % 512 != 0);
+    stat[64..72].copy_from_slice(&(blocks as i64).to_ne_bytes());
+    super::copy_bytes_to_user(stat_ptr, &stat)
+        .map(|_| 0)
+        .unwrap_or_else(|e| e)
+}
+
+/// Linux lseek(fd, offset, whence)；控制台没有文件偏移。
+pub fn sys_lseek(fd: usize, offset: i64, whence: usize) -> isize {
+    let desc = match entry(fd) {
+        Ok(FdEntry::File(desc)) => desc,
+        Ok(FdEntry::ConsoleInput | FdEntry::ConsoleOutput) => return ESPIPE,
+        Err(e) => return e,
+    };
+    let origin = match whence {
+        0 => fs::SeekWhence::Start,
+        1 => fs::SeekWhence::Current,
+        2 => fs::SeekWhence::End,
+        _ => return EINVAL,
+    };
+    desc.seek(offset, origin)
+        .map(|n| n as isize)
+        .unwrap_or_else(|e| e)
+}
+
+/// 目的页先校验并解除 COW；调用期间内核不抢占，没有同一进程的并发 unmap。
+fn prepare_output(buf: usize, len: usize) -> Result<(), isize> {
+    if len == 0 {
+        return Ok(());
+    }
+    let end = buf.checked_add(len).ok_or(EFAULT)?;
+    if buf < super::USER_TEXT_BASE || end > super::USER_STACK_TOP {
+        return Err(EFAULT);
+    }
+    task::with_current_space(|space| space.prepare_user_write(buf, len))
+        .ok_or(EFAULT)?
+        .map_err(|_| EFAULT)
+}
+
+/// 无输入时睡眠；驱动 IRQ 唤醒后重查队列，不将暂时无数据报告为 EOF。
+fn read_console(buf: usize, len: usize) -> isize {
     if len == 0 {
         return 0;
     }
-    let end = buf.checked_add(len).ok_or(EFAULT).unwrap_or(usize::MAX);
-    if buf < super::USER_TEXT_BASE || end > super::USER_STACK_TOP {
-        return EFAULT;
+    let count = len.min(256);
+    if let Err(e) = prepare_output(buf, count) {
+        return e;
     }
-    let mut tmp = alloc::vec![0u8; len];
-    let n = match ramfs::read_at(&desc, &mut tmp) {
+    let mut bytes = [0u8; 256];
+    loop {
+        let n = crate::arch::console::read_available(&mut bytes[..count]);
+        if n != 0 {
+            return super::copy_bytes_to_user(buf, &bytes[..n])
+                .map(|_| n as isize)
+                .unwrap_or_else(|e| e);
+        }
+        task::block_current_on_console_if_empty();
+    }
+}
+
+pub fn sys_read(fd: usize, buf: usize, len: usize) -> isize {
+    let desc = match entry(fd) {
+        Ok(FdEntry::ConsoleInput) => return read_console(buf, len),
+        // 保留现有 stdout/stderr read 返回 EOF 的行为。
+        Ok(FdEntry::ConsoleOutput) => return 0,
+        Ok(FdEntry::File(desc)) => desc,
+        Err(e) => return e,
+    };
+    if desc.is_dir() {
+        return EISDIR;
+    }
+    read_into_user(desc, buf, len)
+}
+
+/// Linux pread64：先准备用户目标页，再读指定文件位置；不消费打开描述游标。
+pub fn sys_pread64(fd: usize, buf: usize, len: usize, offset: i64) -> isize {
+    let desc = match entry(fd) {
+        Ok(FdEntry::File(desc)) => desc,
+        Ok(FdEntry::ConsoleInput | FdEntry::ConsoleOutput) => return ESPIPE,
+        Err(e) => return e,
+    };
+    if desc.is_dir() {
+        return EISDIR;
+    }
+    if offset < 0 {
+        return EINVAL;
+    }
+    let count = len.min(crate::kernel::mm::address::PAGE_SIZE);
+    if let Err(e) = prepare_output(buf, count) {
+        return e;
+    }
+    let mut bytes = alloc::vec![0; count];
+    let n = match desc.read_at(offset as usize, &mut bytes) {
         Ok(n) => n,
         Err(e) => return e,
     };
-    if n > 0 {
-        // SAFETY: 边界已校验（同 copy_from_user），SUM=1 处理期内核可写用户页。
-        unsafe {
-            core::ptr::copy_nonoverlapping(tmp.as_ptr(), buf as *mut u8, n);
-        }
-    }
-    n as isize
+    super::copy_bytes_to_user(buf, &bytes[..n])
+        .map(|_| n as isize)
+        .unwrap_or_else(|e| e)
 }
 
-/// write(2)：fd 1/2 控制台；文件按共享偏移写（越界扩展内容）。
+/// 文件读取最多一页，防止用户长度造成无界堆分配。
+/// 先准备用户页，再推进打开描述偏移，最后写回已经准备好的目的缓冲。
+fn read_into_user(desc: Arc<OpenFileDesc>, buf: usize, len: usize) -> isize {
+    let count = len.min(crate::kernel::mm::address::PAGE_SIZE);
+    if let Err(e) = prepare_output(buf, count) {
+        return e;
+    }
+    let mut bytes = alloc::vec![0; count];
+    let n = match desc.read(&mut bytes) {
+        Ok(n) => n,
+        Err(e) => return e,
+    };
+    super::copy_bytes_to_user(buf, &bytes[..n])
+        .map(|_| n as isize)
+        .unwrap_or_else(|e| e)
+}
+
 pub fn sys_write(fd: usize, buf: usize, len: usize) -> isize {
-    let data = match super::copy_from_user(buf, len) {
-        Ok(d) => d,
+    let target = match entry(fd) {
+        Ok(entry) => entry,
         Err(e) => return e,
     };
-    let desc = task::with_current_fds(
-        |fds: &mut FdTable| -> Result<Option<Arc<OpenFileDesc>>, isize> {
-            match fds.get(fd) {
-                Some(FdEntry::File(d)) => Ok(Some(d.clone())),
-                Some(FdEntry::Dir(_)) => Err(EISDIR),
-                Some(FdEntry::Console) => Ok(None),
-                None => Ok(None),
-            }
-        },
-    );
-    let desc = match desc {
-        Ok(Some(d)) => d,
+    let count = len.min(crate::kernel::mm::address::PAGE_SIZE);
+    let bytes = match super::copy_from_user(buf, count) {
+        Ok(bytes) => bytes,
         Err(e) => return e,
-        Ok(None) => {
-            let exists = task::with_current_fds(|fds: &mut FdTable| fds.get(fd).is_some());
-            if !exists {
-                return EBADF;
+    };
+    match target {
+        FdEntry::ConsoleInput | FdEntry::ConsoleOutput => {
+            if !bytes.is_empty() {
+                crate::arch::console::kernel_arch_console_write(bytes.as_ptr(), bytes.len());
             }
-            if !data.is_empty() {
-                crate::arch::console::kernel_arch_console_write(data.as_ptr(), data.len());
-            }
-            return len as isize;
+            bytes.len() as isize
         }
-    };
-    match ramfs::write_at(&desc, data) {
-        Ok(_) => len as isize,
-        Err(e) => e,
+        FdEntry::File(desc) => desc.write(&bytes).map(|n| n as isize).unwrap_or_else(|e| e),
     }
 }
 
-/// dup(2)：新 fd 指向同一打开文件描述（共享偏移）。
+/// Linux pwrite64：源缓冲先复制到内核，再写指定位置；共享游标不改变。
+pub fn sys_pwrite64(fd: usize, buf: usize, len: usize, offset: i64) -> isize {
+    let desc = match entry(fd) {
+        Ok(FdEntry::File(desc)) => desc,
+        Ok(FdEntry::ConsoleInput | FdEntry::ConsoleOutput) => return ESPIPE,
+        Err(e) => return e,
+    };
+    if desc.is_dir() {
+        return EISDIR;
+    }
+    if offset < 0 {
+        return EINVAL;
+    }
+    let count = len.min(crate::kernel::mm::address::PAGE_SIZE);
+    let bytes = match super::copy_from_user(buf, count) {
+        Ok(bytes) => bytes,
+        Err(e) => return e,
+    };
+    desc.write_at(offset as usize, &bytes)
+        .map(|n| n as isize)
+        .unwrap_or_else(|e| e)
+}
+
 pub fn sys_dup(fd: usize) -> isize {
-    task::with_current_fds(|fds: &mut FdTable| {
-        let entry = match fds.get(fd) {
-            Some(e) => e.clone(),
-            None => return EBADF,
-        };
-        match fds.alloc(entry) {
-            Ok(newfd) => newfd as isize,
-            Err(e) => e,
-        }
+    task::with_current_fds(|fds| {
+        let entry = fds.get(fd).cloned().ok_or(EBADF)?;
+        fds.alloc(entry)
     })
+    .map(|fd| fd as isize)
+    .unwrap_or_else(|e| e)
 }
 
-/// getdents64(2)（SYS=217，G5 shell）：列出打开的目录项（Linux dirent64 布局）。
-/// 每次调用从目录游标起填充若干 dirent64，返回写入字节数；耗尽返回 0。
+/// 非目录为 ENOTDIR；缓冲放不下一个完整记录为 EINVAL，EOF 为 0。
 pub fn sys_getdents64(fd: usize, buf: usize, len: usize) -> isize {
-    let cursor = task::with_current_fds(
-        |fds: &mut FdTable| -> Result<Option<Arc<AtomicUsize>>, isize> {
-            match fds.get(fd) {
-                Some(FdEntry::Dir(c)) => Ok(Some(c.clone())),
-                Some(_) => Ok(None), // 非目录 fd
-                None => Err(EBADF),
-            }
-        },
-    );
-    let cursor = match cursor {
-        Ok(Some(c)) => c,
-        Ok(None) => return EISDIR,
+    let desc = match entry(fd) {
+        Ok(FdEntry::File(desc)) if desc.is_dir() => desc,
+        Ok(_) => return ENOTDIR,
         Err(e) => return e,
     };
-    let end = buf.checked_add(len).ok_or(EFAULT).unwrap_or(usize::MAX);
-    if buf < super::USER_TEXT_BASE || end > super::USER_STACK_TOP {
-        return EFAULT;
+    let count = len.min(crate::kernel::mm::address::PAGE_SIZE);
+    if let Err(e) = prepare_output(buf, count) {
+        return e;
     }
-    let names = ramfs::list_names();
-    let start = cursor.load(Ordering::Relaxed);
-    if start >= names.len() {
-        return 0;
-    }
-    let mut written = 0usize;
-    for (i, name) in names.iter().skip(start).enumerate() {
-        let idx = start + i;
-        let reclen = ((19 + name.len()) + 7) / 8 * 8;
-        if written + reclen > len {
-            break;
+    let mut bytes = alloc::vec![0u8; count];
+    let mut written = 0;
+    let result = desc.read_dir(|entry, next_position| {
+        // linux_dirent64：19 字节头、名字、NUL，然后按 8 字节对齐。
+        let reclen = (19 + entry.name.len() + 1 + 7) & !7;
+        if reclen > count - written {
+            return if written == 0 { Err(EINVAL) } else { Ok(false) };
         }
-        let dst = buf + written;
-        // SAFETY: 边界已校验（段内），SUM=1 处理期内核可写用户页。
-        unsafe {
-            core::ptr::write(dst as *mut u64, (idx + 1) as u64); // d_ino
-            core::ptr::write((dst + 8) as *mut u64, (idx + 1) as u64); // d_off（下一项序号）
-            core::ptr::write((dst + 16) as *mut u16, reclen as u16); // d_reclen
-            core::ptr::write((dst + 18) as *mut u8, 8); // d_type = DT_REG
-            core::ptr::copy_nonoverlapping(name.as_ptr(), (dst + 19) as *mut u8, name.len());
-            core::ptr::write((dst + 19 + name.len()) as *mut u8, 0); // name null 终止
-        }
-        cursor.store(idx + 1, Ordering::Relaxed);
+        let record = &mut bytes[written..written + reclen];
+        record[..8].copy_from_slice(&(entry.inode_number as u64).to_ne_bytes());
+        record[8..16].copy_from_slice(&(next_position as i64).to_ne_bytes());
+        record[16..18].copy_from_slice(&(reclen as u16).to_ne_bytes());
+        record[18] = match entry.file_type {
+            fs::FileType::Regular => 8,
+            fs::FileType::Directory => 4,
+        };
+        record[19..19 + entry.name.len()].copy_from_slice(&entry.name);
         written += reclen;
+        Ok(true)
+    });
+    if let Err(e) = result {
+        return e;
     }
-    written as isize
+    super::copy_bytes_to_user(buf, &bytes[..written])
+        .map(|_| written as isize)
+        .unwrap_or_else(|e| e)
 }
