@@ -15,6 +15,10 @@ const LSR: usize = 0x5; // 线路状态（bit5 = THRE）
 const LCR_8N1: u8 = 0x03;
 const LCR_DLAB: u8 = 0x80;
 const LSR_THRE: u8 = 0x20;
+const LSR_DATA_READY: u8 = 0x01;
+
+/// 当前 LoongArch 未接入 RX 中断；无输入时不能让任务阻塞等待。
+pub const INPUT_WAKEUP_SUPPORTED: bool = false;
 
 #[inline]
 unsafe fn write_reg(offset: usize, value: u8) {
@@ -48,6 +52,26 @@ fn putchar(ch: u8) {
         while read_reg(LSR) & LSR_THRE == 0 {}
         write_reg(THR, ch);
     }
+}
+
+/// 轮询读取当前已到达的串口字节，不等待后续输入。
+pub fn read_available(dst: &mut [u8]) -> usize {
+    let mut read = 0;
+    while read < dst.len() {
+        // SAFETY: UART 寄存器页已由 LoongArch 内核地址空间映射。
+        if unsafe { read_reg(LSR) } & LSR_DATA_READY == 0 {
+            break;
+        }
+        dst[read] = unsafe { read_reg(THR) };
+        read += 1;
+    }
+    read
+}
+
+/// 与 RISC-V 控制台抽象保持同形；这里只探测硬件当前是否有字节。
+pub fn has_input() -> bool {
+    // SAFETY: 同 read_available；只读串口线路状态寄存器。
+    unsafe { read_reg(LSR) & LSR_DATA_READY != 0 }
 }
 
 /// klib::log 的字节输出钩子。

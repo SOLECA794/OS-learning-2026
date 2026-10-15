@@ -46,6 +46,10 @@ la-switch-test = []
 la-process-test = []
 # LoongArch execve 成功/失败原生用户程序验收模式。
 la-exec-test = []
+# LoongArch 用户态文件 openat/read/close 定向验收模式。
+la-file-test = []
+# LoongArch 文件写入、定位读写和 dup 用户态验收模式。
+la-fd-ops-test = []
 
 [profile.dev]
 panic = "abort"

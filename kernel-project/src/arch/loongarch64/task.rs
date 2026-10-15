@@ -15,11 +15,29 @@ pub const INITIAL_USER_STACK_BYTES: usize = 0x1000;
 /// 当前 LoongArch 构建的首个用户 ELF；与 RISC-V ecall 程序互不混用。
 pub fn initial_user_image() -> &'static [u8] {
     // 进程验收模式使用独立 ELF，默认仍运行 M1.5 用户程序。
-    #[cfg(feature = "la-exec-test")]
+    #[cfg(feature = "la-fd-ops-test")]
+    const UAPP_ELF: &[u8] = include_bytes!("../../../build/user/la-fd-ops.elf");
+    #[cfg(all(not(feature = "la-fd-ops-test"), feature = "la-file-test"))]
+    const UAPP_ELF: &[u8] = include_bytes!("../../../build/user/la-file.elf");
+    #[cfg(all(
+        not(feature = "la-fd-ops-test"),
+        not(feature = "la-file-test"),
+        feature = "la-exec-test"
+    ))]
     const UAPP_ELF: &[u8] = include_bytes!("../../../build/user/la-exec.elf");
-    #[cfg(all(not(feature = "la-exec-test"), feature = "la-process-test"))]
+    #[cfg(all(
+        not(feature = "la-fd-ops-test"),
+        not(feature = "la-file-test"),
+        not(feature = "la-exec-test"),
+        feature = "la-process-test"
+    ))]
     const UAPP_ELF: &[u8] = include_bytes!("../../../build/user/la-process.elf");
-    #[cfg(not(any(feature = "la-exec-test", feature = "la-process-test")))]
+    #[cfg(not(any(
+        feature = "la-fd-ops-test",
+        feature = "la-file-test",
+        feature = "la-exec-test",
+        feature = "la-process-test"
+    )))]
     const UAPP_ELF: &[u8] = include_bytes!("../../../build/user/la-uapp.elf");
     UAPP_ELF
 }

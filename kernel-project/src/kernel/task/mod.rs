@@ -579,12 +579,15 @@ pub(crate) fn block_current_and_wait() {
 
 /// 在 SIE=0 的 syscall 上下文中，原子完成「确认无数据 → 登记等待」。
 /// IRQ 只能在返回用户态或 idle_once 打开中断后进入，因此不会丢唤醒。
-#[cfg(feature = "arch-riscv64")]
-pub(crate) fn block_current_on_console_if_empty() {
+pub(crate) fn block_current_on_console_if_empty() -> bool {
+    // 仅有串口轮询而无 RX 唤醒的架构不能登记等待者。
+    if !arch::console::INPUT_WAKEUP_SUPPORTED {
+        return false;
+    }
     let current = {
         let mut sched = SCHED.lock();
         if arch::console::has_input() {
-            return;
+            return true;
         }
         let current = sched.current;
         sched.tasks[current].as_mut().unwrap().state = TaskState::WaitingConsole;
@@ -592,6 +595,7 @@ pub(crate) fn block_current_on_console_if_empty() {
     };
     crate::log_info!("[console] task {} waiting for input", current);
     schedule();
+    true
 }
 
 /// UART IRQ 在字节进入 RX 队列后调用；只改变 task 状态，不消费字节。

@@ -38,7 +38,7 @@ $(error 编排错误：配置/清理目标不能与构建目标同条命令。�
 endif
 endif
 
-DEFAULT_PHONY := all defconfig alldefconfig menuconfig check build run gdb test test-user test-la-switch build-la-switch test-la-process build-la-process test-la-exec build-la-exec fmt fmt-check clean user user-la user-fault build-fault test-fault run-shell build-shell test-shell build-console test-console build-vfs test-vfs test-process build-cow-oom test-cow-oom build-brk test-brk build-pipe test-pipe build-mmap test-mmap
+DEFAULT_PHONY := all defconfig alldefconfig menuconfig check build run gdb test test-user test-la-switch build-la-switch test-la-process build-la-process test-la-exec build-la-exec test-la-file build-la-file test-la-fd-ops build-la-fd-ops fmt fmt-check clean user user-la user-fault build-fault test-fault run-shell build-shell test-shell build-console test-console build-vfs test-vfs test-process build-cow-oom test-cow-oom build-brk test-brk build-pipe test-pipe build-mmap test-mmap
 .PHONY: $(DEFAULT_PHONY)
 
 all:
@@ -104,13 +104,37 @@ test-la-exec: build-la-exec
 		--mode boot --timeout $(LA_EXEC_TIMEOUT) --pattern "LA_USER_EXIT_PASS code=0" --run-id la-exec-$(RUN_ID) --elf $(KERNEL_ELF)
 	$(PYTHON) tools/check_la_exec.py artifacts/runs/la-exec-$(RUN_ID)/serial.log
 
+# LoongArch M2.5：用户态通过统一 VFS 打开 ramfs/staticfs 文件并读取。
+build-la-file: user user-la
+	@mkdir -p $(BUILD_DIR)
+	$(CARGO) build --target $(RUST_TARGET) --features $(RUST_FEATURES),la-file-test $(CARGO_PROFILE_FLAG)
+	@cp $(CARGO_OUT_DIR)/$(KERNEL_NAME) $(KERNEL_ELF)
+	@$(PYTHON) tools/check-image.py $(KERNEL_ELF) $(LINK_BASE) $(ARCH)
+
+test-la-file: build-la-file
+	$(PYTHON) tools/run_qemu.py --qemu $(QEMU_BIN) --flags "$(QEMU_FLAGS)" --arch $(ARCH) \
+		--mode boot --timeout 60 --pattern "LA_USER_EXIT_PASS code=0" --run-id la-file-$(RUN_ID) --elf $(KERNEL_ELF)
+	$(PYTHON) tools/check_la_file.py artifacts/runs/la-file-$(RUN_ID)/serial.log
+
+# LoongArch FD 第二批：普通文件 write、定位读写、dup 共享游标。
+build-la-fd-ops: user user-la
+	@mkdir -p $(BUILD_DIR)
+	$(CARGO) build --target $(RUST_TARGET) --features $(RUST_FEATURES),la-fd-ops-test $(CARGO_PROFILE_FLAG)
+	@cp $(CARGO_OUT_DIR)/$(KERNEL_NAME) $(KERNEL_ELF)
+	@$(PYTHON) tools/check-image.py $(KERNEL_ELF) $(LINK_BASE) $(ARCH)
+
+test-la-fd-ops: build-la-fd-ops
+	$(PYTHON) tools/run_qemu.py --qemu $(QEMU_BIN) --flags "$(QEMU_FLAGS)" --arch $(ARCH) \
+		--mode boot --timeout 60 --pattern "LA_USER_EXIT_PASS code=0" --run-id la-fd-ops-$(RUN_ID) --elf $(KERNEL_ELF)
+	$(PYTHON) tools/check_la_fd_ops.py artifacts/runs/la-fd-ops-$(RUN_ID)/serial.log
+
 # 诊断失败时允许缩短等待；正式验收仍使用 60 秒上限。
 LA_EXEC_TIMEOUT ?= 60
 
 # 诊断时可缩短有界运行时间；正式验收默认仍给父子任务 60 秒。
 LA_PROCESS_TIMEOUT ?= 60
 else
-build-la-switch test-la-switch build-la-process test-la-process build-la-exec test-la-exec:
+build-la-switch test-la-switch build-la-process test-la-process build-la-exec test-la-exec build-la-file test-la-file build-la-fd-ops test-la-fd-ops:
 	@echo "LoongArch 专用测试只适用于 ARCH=loongarch64"; exit 1
 endif
 
@@ -166,6 +190,8 @@ LA_USER_ELF := build/user/la-uapp.elf
 LA_PROCESS_ELF := build/user/la-process.elf
 LA_EXEC_ELF := build/user/la-exec.elf
 LA_EXEC_TARGET_ELF := build/user/la-exec-target.elf
+LA_FILE_ELF := build/user/la-file.elf
+LA_FD_OPS_ELF := build/user/la-fd-ops.elf
 LA_USER_RUSTFLAGS := -C link-arg=-T$(CURDIR)/user/loongarch64/user.ld -C target-feature=-lsx,-lasx
 
 user-la:
@@ -175,6 +201,8 @@ user-la:
 	@cp user/loongarch64/target/loongarch64-unknown-none/release/la-process $(LA_PROCESS_ELF)
 	@cp user/loongarch64/target/loongarch64-unknown-none/release/la-exec $(LA_EXEC_ELF)
 	@cp user/loongarch64/target/loongarch64-unknown-none/release/la-exec-target $(LA_EXEC_TARGET_ELF)
+	@cp user/loongarch64/target/loongarch64-unknown-none/release/la-file $(LA_FILE_ELF)
+	@cp user/loongarch64/target/loongarch64-unknown-none/release/la-fd-ops $(LA_FD_OPS_ELF)
 
 ## W2 附加用例：fault 模式用户程序（make test-fault 专用）--------------------------
 

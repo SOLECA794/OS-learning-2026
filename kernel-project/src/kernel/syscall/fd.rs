@@ -175,7 +175,10 @@ fn read_console(buf: usize, len: usize) -> isize {
                 .map(|_| n as isize)
                 .unwrap_or_else(|e| e);
         }
-        task::block_current_on_console_if_empty();
+        // LA 尚无串口 RX 中断，空输入返回 EAGAIN，不让任务永远睡眠。
+        if !task::block_current_on_console_if_empty() {
+            return -11;
+        }
     }
 }
 

@@ -29,7 +29,6 @@ pub const SYSCALL_MUNMAP: usize = 215;
 pub const SYSCALL_MMAP: usize = 222;
 
 mod exec;
-#[cfg(feature = "arch-riscv64")]
 mod fd;
 mod power;
 
@@ -59,23 +58,16 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
         SYSCALL_WRITE => fd::sys_write(args[0], args[1], args[2]),
         #[cfg(feature = "arch-loongarch64")]
         SYSCALL_WRITE => la_write(args[0], args[1], args[2]),
-        #[cfg(feature = "arch-riscv64")]
         SYSCALL_READ => fd::sys_read(args[0], args[1], args[2]),
-        #[cfg(feature = "arch-riscv64")]
         SYSCALL_LSEEK => fd::sys_lseek(args[0], args[1] as i64, args[2]),
-        #[cfg(feature = "arch-riscv64")]
         SYSCALL_PREAD64 => fd::sys_pread64(args[0], args[1], args[2], args[3] as i64),
-        #[cfg(feature = "arch-riscv64")]
         SYSCALL_PWRITE64 => fd::sys_pwrite64(args[0], args[1], args[2], args[3] as i64),
         #[cfg(feature = "arch-riscv64")]
         SYSCALL_FSTAT => fd::sys_fstat(args[0], args[1]),
-        #[cfg(feature = "arch-riscv64")]
         SYSCALL_CLOSE => fd::sys_close(args[0]),
-        #[cfg(feature = "arch-riscv64")]
         SYSCALL_OPENAT => fd::sys_openat(args[0], args[1], args[2], args[3]),
         #[cfg(feature = "arch-riscv64")]
         SYSCALL_MKDIRAT => fd::sys_mkdirat(args[0], args[1], args[2]),
-        #[cfg(feature = "arch-riscv64")]
         SYSCALL_DUP => fd::sys_dup(args[0]),
         #[cfg(feature = "arch-riscv64")]
         SYSCALL_DUP2 => fd::sys_dup2(args[0], args[1]),
@@ -118,11 +110,15 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
     }
 }
 
-/// LA M1.5 单任务控制台桥。真实 FD 表随 LA task 适配迁入共享 fd 模块。
+/// LoongArch 控制台临时桥：保留原 stdout/stderr 行为；其他 FD 交给公共表。
+/// 待控制台写入完成 FD 化验收后，移除此分支并统一调用 `fd::sys_write`。
 #[cfg(feature = "arch-loongarch64")]
 fn la_write(fd: usize, ptr: usize, len: usize) -> isize {
-    if fd != 1 && fd != 2 {
+    if fd == 0 {
         return EBADF;
+    }
+    if fd != 1 && fd != 2 {
+        return fd::sys_write(fd, ptr, len);
     }
     if len > crate::kernel::mm::address::PAGE_SIZE {
         return -22;
