@@ -6,6 +6,7 @@
 pub const UART0: usize = 0x1000_0000;
 pub const UART0_IRQ: u32 = 10;
 pub const PLIC: usize = 0x0c00_0000;
+pub const VIRTIO_BLK: usize = 0x1000_1000;
 
 // QEMU virt 每个 hart 有 M、S 两个 PLIC context：hart n 的 S context = 2n+1。
 // bootstrap hart 由启动选主决定，不能固定使用 hart 0 的 context。
@@ -37,4 +38,5 @@ pub const DEVICE_RANGES: &[(usize, usize)] = &[
     (PLIC + 0x20d000, PLIC + 0x20e000),
     (PLIC + 0x20f000, PLIC + 0x210000),
     (UART0, UART0 + 0x1000),
+    (VIRTIO_BLK, VIRTIO_BLK + 0x1000),
 ];

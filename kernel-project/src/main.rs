@@ -7,6 +7,7 @@ extern crate alloc;
 mod klib;
 
 mod arch;
+mod drivers;
 mod fs;
 mod kernel;
 

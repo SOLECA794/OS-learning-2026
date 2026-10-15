@@ -331,6 +331,7 @@ pub(crate) fn boot_tasks(hartid: usize) -> ! {
     crate::arch::timer::init();
     crate::arch::interrupt::init(hartid);
     crate::fs::init();
+    crate::drivers::init();
     #[cfg(feature = "uapp-fault-test")]
     const UAPP_ELF: &[u8] = include_bytes!("../../../build/user/uapp_fault.elf");
     // G5 shell 演示模式（make run-shell）：task0 = shell.elf，跑固定输入脚本 /cmds.txt。
