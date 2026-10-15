@@ -4,11 +4,14 @@
 
 自研 VFS 层 + 先 tmpfs/ramfs 后 ext4 的具体文件系统，提供 Linux 语义的 open/read/write/stat/mmap 文件接口与页缓存，支撑 CAgent 文件类测例（一等奖工程量大头在此）与 BuildStorm 的编译 I/O。
 
-当前实现（2026-10-14）：`src/fs/mod.rs` 是路径/VFS 入口，`ramfs.rs` 持有目录树与文件内容，
-`file.rs` 持有共享打开描述；任务的 FD 槽位在 `src/kernel/task/fd_table.rs`。
+当前实现（2026-10-15）：`src/kernel/fs/vfs/` 是路径解析、固定挂载表与共享打开描述入口，
+`src/kernel/fs/ramfs/` 持有可写文件树，`staticfs.rs` 提供 `/static/readme` 只读后端；
+任务的 FD 槽位仍在 `src/kernel/task/fd_table.rs`。第二后端已在 RISC-V 用户态
+`test-vfs` 中验收，在 LoongArch QEMU 中仅由共同启动阶段的内核自检验收；
+LoongArch 用户态文件 syscall 尚未落地。
 已支持用户态 mkdirat、子目录文件 IO、目录枚举与按子目录路径 exec；详见
 `log/rfc/M25-vfs/index.md` 的运行验收。下列四 trait、挂载、ext4 和缓存仍为后续设计，
-当前单一后端使用具体节点模型，第二个后端接入时再确定最小公共 trait。
+当前 `VfsNode` 是最小内部节点接口；完整四 trait、通用挂载 syscall、ext4 和页缓存仍为后续设计。
 M3 已将 RISC-V `openat` 改为 `(dirfd, path, flags, mode)`，相对路径可从已打开的
 目录节点逐段查找；`mkdirat` 也共用目录 fd 路径起点。`AT_FDCWD` 当前指向根目录，
 尚无真正的进程 cwd 或权限模型。
@@ -16,7 +19,7 @@ M3 已将 RISC-V `openat` 改为 `(dirfd, path, flags, mode)`，相对路径可�
 ## 2. 组成
 
 ```
-src/fs/
+src/kernel/fs/
 ├── vfs/           VFS 抽象：Inode / Dentry / File / Superblock / 挂载表
 ├── inode/         文件对象语义：FileOps / InodeOps / DentryOps
 ├── pagecache/     统一页缓存（inode-local，LRU 回收）

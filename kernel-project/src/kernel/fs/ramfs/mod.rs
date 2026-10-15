@@ -7,10 +7,13 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicUsize, Ordering};
 
-use super::{
+use super::vfs::node::{NodeRef, VfsNode};
+use super::vfs::{
     DirectoryEntry, FileMetadata, FileType, EEXIST, EINVAL, EISDIR, ENOENT, ENOMEM, ENOTDIR,
 };
 use crate::klib::sync::SpinLock;
+
+pub(crate) mod programs;
 
 /// inode 编号用于目录枚举身份；创建后固定，和路径、打开偏移均无关。
 static NEXT_INO: AtomicUsize = AtomicUsize::new(1);
@@ -26,13 +29,13 @@ enum NodeData {
 }
 
 /// 不透明 ramfs 节点句柄；内容及目录项只在 data 锁内访问。
-pub(super) struct Inode {
+pub(in crate::kernel::fs) struct Inode {
     ino: usize,
     data: SpinLock<NodeData>,
 }
 
 impl Inode {
-    pub(super) fn new(kind: FileType) -> Arc<Self> {
+    pub(in crate::kernel::fs) fn new(kind: FileType) -> Arc<Self> {
         Arc::new(Self {
             ino: NEXT_INO.fetch_add(1, Ordering::Relaxed),
             data: SpinLock::new(match kind {
@@ -42,7 +45,7 @@ impl Inode {
         })
     }
 
-    pub(super) fn kind(&self) -> FileType {
+    pub(in crate::kernel::fs) fn kind(&self) -> FileType {
         match &*self.data.lock() {
             NodeData::File(_) => FileType::Regular,
             NodeData::Directory(_) => FileType::Directory,
@@ -50,7 +53,7 @@ impl Inode {
     }
 
     /// 普通文件长度按字节计；目录长度是当前 getdents 游标的条目数。
-    pub(super) fn seek_len(&self) -> usize {
+    pub(in crate::kernel::fs) fn seek_len(&self) -> usize {
         match &*self.data.lock() {
             NodeData::File(bytes) => bytes.len(),
             NodeData::Directory(entries) => entries.len(),
@@ -58,7 +61,7 @@ impl Inode {
     }
 
     /// 节点编号不变；类型和逻辑文件长度在同一把内容锁内取快照。
-    pub(super) fn metadata(&self) -> FileMetadata {
+    pub(in crate::kernel::fs) fn metadata(&self) -> FileMetadata {
         let data = self.data.lock();
         let (file_type, size) = match &*data {
             NodeData::File(bytes) => (FileType::Regular, bytes.len()),
@@ -72,7 +75,7 @@ impl Inode {
     }
 
     /// 查找或原子创建一个子项。exclusive 防止 O_EXCL / mkdir 覆盖旧节点。
-    pub(super) fn child(
+    pub(in crate::kernel::fs) fn child(
         &self,
         name: &[u8],
         create: Option<FileType>,
@@ -100,7 +103,7 @@ impl Inode {
         Ok(inode)
     }
 
-    pub(super) fn truncate(&self) -> Result<(), isize> {
+    pub(in crate::kernel::fs) fn truncate(&self) -> Result<(), isize> {
         match &mut *self.data.lock() {
             NodeData::File(bytes) => {
                 bytes.clear();
@@ -111,7 +114,11 @@ impl Inode {
     }
 
     /// 从指定偏移短读。其它打开描述截断文件后，旧偏移超出 EOF 仍返回 0。
-    pub(super) fn read_at(&self, offset: usize, buf: &mut [u8]) -> Result<usize, isize> {
+    pub(in crate::kernel::fs) fn read_at(
+        &self,
+        offset: usize,
+        buf: &mut [u8],
+    ) -> Result<usize, isize> {
         let data = self.data.lock();
         let NodeData::File(bytes) = &*data else {
             return Err(EISDIR);
@@ -126,7 +133,7 @@ impl Inode {
 
     /// append 在内容锁内选择 EOF，避免不同打开描述覆盖彼此的追加数据。
     /// 返回写后偏移；调用方拥有打开描述的偏移锁。
-    pub(super) fn write_at(
+    pub(in crate::kernel::fs) fn write_at(
         &self,
         offset: usize,
         bytes: &[u8],
@@ -145,14 +152,26 @@ impl Inode {
             content
                 .try_reserve(end - content.len())
                 .map_err(|_| ENOMEM)?;
-            content.resize(end, 0);
+            // 逐字节初始化扩展区，避免部分裸机编译器内建 memset 使用未开启的
+            // LoongArch LSX 指令；初始化全部完成后才发布新的 Vec 长度。
+            let old_len = content.len();
+            for index in old_len..end {
+                // SAFETY: try_reserve 保证容量 >= end；本次只写未初始化的扩展区。
+                unsafe { content.as_mut_ptr().add(index).write_volatile(0) };
+            }
+            // SAFETY: [old_len, end) 已逐字节初始化，旧区间原本有效。
+            unsafe { content.set_len(end) };
         }
-        content[start..end].copy_from_slice(bytes);
+        for (index, &byte) in bytes.iter().enumerate() {
+            // SAFETY: [start, end) 已在有效长度内；volatile 阻止编译器改写为
+            // 不受目标 feature 约束的 compiler-builtins memcpy。
+            unsafe { content.as_mut_ptr().add(start + index).write_volatile(byte) };
+        }
         Ok(end)
     }
 
     /// exec 取得内容快照；返回后不持文件锁，ELF 解析不暴露内部 Vec。
-    pub(super) fn read_all(&self) -> Result<Vec<u8>, isize> {
+    pub(in crate::kernel::fs) fn read_all(&self) -> Result<Vec<u8>, isize> {
         let data = self.data.lock();
         match &*data {
             NodeData::File(bytes) => Ok(bytes.clone()),
@@ -162,7 +181,10 @@ impl Inode {
 
     /// 只返回目录项元数据；用户 ABI 记录由 syscall 层编码。
     /// 暂无删除/重命名，因此索引在追加目录项后仍稳定。
-    pub(super) fn dir_entry(&self, index: usize) -> Result<Option<DirectoryEntry>, isize> {
+    pub(in crate::kernel::fs) fn dir_entry(
+        &self,
+        index: usize,
+    ) -> Result<Option<DirectoryEntry>, isize> {
         let data = self.data.lock();
         let NodeData::Directory(entries) = &*data else {
             return Err(ENOTDIR);
@@ -172,5 +194,37 @@ impl Inode {
             name: entry.name.clone(),
             file_type: entry.inode.kind(),
         }))
+    }
+}
+
+impl VfsNode for Inode {
+    fn metadata(&self) -> FileMetadata {
+        Inode::metadata(self)
+    }
+    fn seek_len(&self) -> usize {
+        Inode::seek_len(self)
+    }
+    fn child(
+        &self,
+        name: &[u8],
+        create: Option<FileType>,
+        exclusive: bool,
+    ) -> Result<NodeRef, isize> {
+        Inode::child(self, name, create, exclusive).map(|node| node as NodeRef)
+    }
+    fn truncate(&self) -> Result<(), isize> {
+        Inode::truncate(self)
+    }
+    fn read_at(&self, offset: usize, buf: &mut [u8]) -> Result<usize, isize> {
+        Inode::read_at(self, offset, buf)
+    }
+    fn write_at(&self, offset: usize, bytes: &[u8], append: bool) -> Result<usize, isize> {
+        Inode::write_at(self, offset, bytes, append)
+    }
+    fn read_all(&self) -> Result<Vec<u8>, isize> {
+        Inode::read_all(self)
+    }
+    fn dir_entry(&self, index: usize) -> Result<Option<DirectoryEntry>, isize> {
+        Inode::dir_entry(self, index)
     }
 }

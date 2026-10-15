@@ -1,4 +1,4 @@
-//! 任务与调度（W3 最小：RV 单核 + 用户态时钟抢占 RR）。
+//! 共享任务所有权与调度状态；RV 已启用单核时钟抢占，LA 暂为单任务。
 //!
 //! 模型（docs/03 §3 子集）：
 //! - `TaskControlBlock` 持有用户地址空间（`Box<MemorySet>`，切任务时 activate 其
@@ -6,8 +6,8 @@
 //!   （`TaskContext`）。用户态现场（`TrapContext`）位于内核栈顶下方，由恢复汇编
 //!   用 sp 定位，不另存指针。
 //! - 调度：全局 FIFO 就绪队列；时钟中断 → 当前任务入队尾 → `__switch` 切下一个。
-//!   内核态不抢占：trap 进入时 sstatus.SIE 被硬件清零，handler 期间无嵌套中断，
-//!   只有用户态（SIE=1）会被时钟打断——符合规划书「先用户态抢占、内核暂不抢占」。
+//!   RV 内核态不抢占：trap 进入时 SIE 被硬件清零，handler 期间无嵌套中断；
+//!   LA 未开启时钟中断，直到架构中断后端完成前只运行首任务。
 //!
 //! 并发前提（M2 登记，见 log/boundary/M2-scheduler-rv.md）：仅 bootstrap hart
 //! 运行内核（从核在 kernel_main park），就绪队列与 TCB 无跨核竞争；M3 SMP 落地时
@@ -149,8 +149,8 @@ impl Scheduler {
     }
 }
 
-/// 用户栈顶固定低于内核身份映射区（RV: 内核 0x8000_0000 起）。
-const USER_STACK_TOP: usize = 0x7f00_0000;
+/// 用户栈顶由架构虚拟地址布局决定；任务模块只使用统一常量。
+const USER_STACK_TOP: usize = arch::task::INITIAL_USER_STACK_TOP;
 
 /// 从 ELF 构建一个用户任务：独立地址空间 + 内核栈 + 栈顶 TrapContext + 首次切换现场。
 pub(crate) fn create_task(
@@ -163,7 +163,7 @@ pub(crate) fn create_task(
         arch::mm::physical_memory_range(memory_bytes).expect("configured memory range unavailable");
 
     let user_stack = AddressRange::new(
-        VirtAddr::new(USER_STACK_TOP - 0x1000),
+        VirtAddr::new(USER_STACK_TOP - arch::task::INITIAL_USER_STACK_BYTES),
         VirtAddr::new(USER_STACK_TOP),
     )
     .expect("user stack range");
@@ -245,30 +245,36 @@ pub(crate) fn schedule() {
         let next = match sched.ready.pop_front() {
             Some(next) => next,
             None => {
-                let awaiting_console = sched
-                    .tasks
-                    .iter()
-                    .flatten()
-                    .any(|t| t.state == TaskState::WaitingConsole);
-                drop(sched);
-                if !awaiting_console {
-                    crate::log_info!("[sched] ready queue empty, parking");
-                    crate::arch::park();
-                }
-                crate::log_info!("[sched] idle waiting for console input");
-                // 当前任务内核栈充当临时 idle 栈；被 IRQ 唤醒后仍从此处继续。
-                // 没有并发退出/回收该任务：单 hart，SIE 仅在 idle_once 中打开。
-                loop {
-                    if !SCHED.lock().ready.is_empty() {
-                        break;
+                // LoongArch 尚无异步唤醒源；队列空时只允许安全停驻。
+                #[cfg(feature = "arch-loongarch64")]
+                arch::park();
+                #[cfg(feature = "arch-riscv64")]
+                {
+                    let awaiting_console = sched
+                        .tasks
+                        .iter()
+                        .flatten()
+                        .any(|t| t.state == TaskState::WaitingConsole);
+                    drop(sched);
+                    if !awaiting_console {
+                        crate::log_info!("[sched] ready queue empty, parking");
+                        crate::arch::park();
                     }
-                    arch::interrupt::idle_once();
+                    crate::log_info!("[sched] idle waiting for console input");
+                    // 当前任务内核栈充当临时 idle 栈；被 IRQ 唤醒后仍从此处继续。
+                    // 没有并发退出/回收该任务：单 hart，SIE 仅在 idle_once 中打开。
+                    loop {
+                        if !SCHED.lock().ready.is_empty() {
+                            break;
+                        }
+                        arch::interrupt::idle_once();
+                    }
+                    sched = SCHED.lock();
+                    sched
+                        .ready
+                        .pop_front()
+                        .expect("idle woke without a ready task")
                 }
-                sched = SCHED.lock();
-                sched
-                    .ready
-                    .pop_front()
-                    .expect("idle woke without a ready task")
             }
         };
         if next == current {
@@ -323,50 +329,10 @@ pub(crate) fn exec_replace_space(new_space: MemorySet) {
         .expect("current task missing during exec")
         .space = Box::new(new_space);
 }
-/// RV 启动单任务（M3）：T0 直进用户态，由 uapp 自行 fork 建立父子关系。
+/// 启动首任务：架构层选择用户镜像并准备中断，任务状态由本模块拥有。
 pub(crate) fn boot_tasks(hartid: usize) -> ! {
-    crate::arch::timer::init();
-    crate::arch::interrupt::init(hartid);
-    crate::fs::init();
-    #[cfg(feature = "uapp-fault-test")]
-    const UAPP_ELF: &[u8] = include_bytes!("../../../build/user/uapp_fault.elf");
-    // G5 shell 演示模式（make run-shell）：task0 = shell.elf，跑固定输入脚本 /cmds.txt。
-    #[cfg(all(
-        feature = "uapp-shell",
-        not(feature = "uapp-fault-test"),
-        not(feature = "uapp-cow"),
-        not(feature = "uapp-vfs"),
-        not(feature = "uapp-console")
-    ))]
-    const UAPP_ELF: &[u8] = include_bytes!("../../../build/user/shell.elf");
-    // G6 COW 验收模式（make run-cow）：task0 = uapp-cow.elf，输出 C1–C5 断言。
-    #[cfg(all(
-        feature = "uapp-cow",
-        not(feature = "uapp-shell"),
-        not(feature = "uapp-fault-test"),
-        not(feature = "uapp-vfs"),
-        not(feature = "uapp-console")
-    ))]
-    const UAPP_ELF: &[u8] = include_bytes!("../../../build/user/uapp-cow.elf");
-    #[cfg(all(
-        feature = "uapp-console",
-        not(feature = "uapp-vfs"),
-        not(feature = "uapp-shell"),
-        not(feature = "uapp-cow"),
-        not(feature = "uapp-fault-test")
-    ))]
-    const UAPP_ELF: &[u8] = include_bytes!("../../../build/user/uapp-console.elf");
-    #[cfg(all(feature = "uapp-vfs", not(feature = "uapp-fault-test")))]
-    const UAPP_ELF: &[u8] = include_bytes!("../../../build/user/uapp-vfs.elf");
-    #[cfg(all(
-        not(feature = "uapp-shell"),
-        not(feature = "uapp-fault-test"),
-        not(feature = "uapp-cow"),
-        not(feature = "uapp-vfs"),
-        not(feature = "uapp-console")
-    ))]
-    const UAPP_ELF: &[u8] = include_bytes!("../../../build/user/uapp.elf");
-    let uapp: &[u8] = UAPP_ELF;
+    arch::task::prepare_first_task(hartid);
+    let uapp = arch::task::initial_user_image();
     let elf = crate::kernel::elf::parse(uapp).expect("uapp ELF parse failed");
 
     let t0 = create_task(&elf, uapp).expect("task0 create failed");
@@ -376,7 +342,7 @@ pub(crate) fn boot_tasks(hartid: usize) -> ! {
     #[cfg(feature = "m28-frame-fault-test")]
     test_fork_current_allocation_failures();
 
-    crate::log_info!("M3: task 0 ready, timer armed, entering user mode (uapp will fork)");
+    crate::log_info!("task 0 ready, entering user mode");
     // SAFETY: ppn 是 T0 的有效根页表（launch_first 返回）。
     unsafe { arch::mm::activate(ppn) };
     arch::trap::restore_from(ctx)
@@ -431,7 +397,7 @@ pub(crate) fn fork_current() -> Result<usize, isize> {
 
     // 先完成可能失败的内核栈分配，避免失败的 fork 已经改变父页权限。
     let kstack = KernelStack::new().map_err(|_| ENOMEM)?;
-    // COW 复制地址空间：父可写页同步改为只读共享（需 &mut 父 space）。
+    // 父可写页同步变为只读 COW；两架构共用同一份地址空间复制策略。
     let new_space = {
         let parent = sched.tasks[current].as_mut().unwrap();
         parent
@@ -540,6 +506,11 @@ pub(crate) fn exit_current(code: i32) -> ! {
         current
     };
     crate::log_info!("[exit] task {} exited with code {}", current, code);
+    // 保留 LoongArch 单任务运行验收标记；不作为调度器完成证据。
+    #[cfg(feature = "arch-loongarch64")]
+    if code == 0 {
+        crate::log_info!("LA_USER_EXIT_PASS code=0");
+    }
     schedule(); // Exited 不入队，切走；队列空则 park。
     unreachable!("exited task resumed")
 }
@@ -604,6 +575,7 @@ pub(crate) fn block_current_and_wait() {
 
 /// 在 SIE=0 的 syscall 上下文中，原子完成「确认无数据 → 登记等待」。
 /// IRQ 只能在返回用户态或 idle_once 打开中断后进入，因此不会丢唤醒。
+#[cfg(feature = "arch-riscv64")]
 pub(crate) fn block_current_on_console_if_empty() {
     let current = {
         let mut sched = SCHED.lock();
@@ -620,6 +592,7 @@ pub(crate) fn block_current_on_console_if_empty() {
 
 /// UART IRQ 在字节进入 RX 队列后调用；只改变 task 状态，不消费字节。
 /// 多个读者可一起唤醒并重新竞争字节，未拿到数据者会再次等待。
+#[cfg(feature = "arch-riscv64")]
 pub(crate) fn wake_console_readers() {
     let mut sched = SCHED.lock();
     for id in 0..sched.tasks.len() {

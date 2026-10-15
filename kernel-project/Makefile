@@ -38,7 +38,7 @@ $(error 编排错误：配置/清理目标不能与构建目标同条命令。�
 endif
 endif
 
-DEFAULT_PHONY := all defconfig alldefconfig menuconfig check build run gdb test fmt fmt-check clean user user-fault build-fault test-fault run-shell build-shell test-shell build-console test-console build-vfs test-vfs test-process build-cow-oom test-cow-oom
+DEFAULT_PHONY := all defconfig alldefconfig menuconfig check build run gdb test test-user test-la-switch build-la-switch test-la-process build-la-process test-la-exec build-la-exec fmt fmt-check clean user user-la user-fault build-fault test-fault run-shell build-shell test-shell build-console test-console build-vfs test-vfs test-process build-cow-oom test-cow-oom
 .PHONY: $(DEFAULT_PHONY)
 
 all:
@@ -64,10 +64,60 @@ menuconfig:
 
 ## 编译 ----------------------------------------------------------------------
 
-check: user
+ifeq ($(ARCH),loongarch64)
+ARCH_USER_DEP := user-la
+endif
+
+# LoongArch M2 前置自检：只在专用内核中验证两段内核栈的往返切换。
+ifeq ($(ARCH),loongarch64)
+build-la-switch: user user-la
+	@mkdir -p $(BUILD_DIR)
+	$(CARGO) build --target $(RUST_TARGET) --features $(RUST_FEATURES),la-switch-test $(CARGO_PROFILE_FLAG)
+	@cp $(CARGO_OUT_DIR)/$(KERNEL_NAME) $(KERNEL_ELF)
+	@$(PYTHON) tools/check-image.py $(KERNEL_ELF) $(LINK_BASE) $(ARCH)
+
+test-la-switch: build-la-switch
+	$(PYTHON) tools/run_qemu.py --qemu $(QEMU_BIN) --flags "$(QEMU_FLAGS)" --arch $(ARCH) \
+		--mode boot --timeout 30 --pattern "LA_SWITCH_PASS" --run-id la-switch-$(RUN_ID) --elf $(KERNEL_ELF)
+
+# LoongArch M2：原生用户程序验证 fork/exit/wait4 父子闭环。
+build-la-process: user user-la
+	@mkdir -p $(BUILD_DIR)
+	$(CARGO) build --target $(RUST_TARGET) --features $(RUST_FEATURES),la-process-test $(CARGO_PROFILE_FLAG)
+	@cp $(CARGO_OUT_DIR)/$(KERNEL_NAME) $(KERNEL_ELF)
+	@$(PYTHON) tools/check-image.py $(KERNEL_ELF) $(LINK_BASE) $(ARCH)
+
+test-la-process: build-la-process
+	$(PYTHON) tools/run_qemu.py --qemu $(QEMU_BIN) --flags "$(QEMU_FLAGS)" --arch $(ARCH) \
+		--mode boot --timeout $(LA_PROCESS_TIMEOUT) --pattern "LA_USER_EXIT_PASS code=0" --run-id la-process-$(RUN_ID) --elf $(KERNEL_ELF)
+	$(PYTHON) tools/check_la_process.py artifacts/runs/la-process-$(RUN_ID)/serial.log
+
+# LoongArch exec：测试失败保留旧现场、成功进入新 ELF 并传递 argc/argv。
+build-la-exec: user user-la
+	@mkdir -p $(BUILD_DIR)
+	$(CARGO) build --target $(RUST_TARGET) --features $(RUST_FEATURES),la-exec-test $(CARGO_PROFILE_FLAG)
+	@cp $(CARGO_OUT_DIR)/$(KERNEL_NAME) $(KERNEL_ELF)
+	@$(PYTHON) tools/check-image.py $(KERNEL_ELF) $(LINK_BASE) $(ARCH)
+
+test-la-exec: build-la-exec
+	$(PYTHON) tools/run_qemu.py --qemu $(QEMU_BIN) --flags "$(QEMU_FLAGS)" --arch $(ARCH) \
+		--mode boot --timeout $(LA_EXEC_TIMEOUT) --pattern "LA_USER_EXIT_PASS code=0" --run-id la-exec-$(RUN_ID) --elf $(KERNEL_ELF)
+	$(PYTHON) tools/check_la_exec.py artifacts/runs/la-exec-$(RUN_ID)/serial.log
+
+# 诊断失败时允许缩短等待；正式验收仍使用 60 秒上限。
+LA_EXEC_TIMEOUT ?= 60
+
+# 诊断时可缩短有界运行时间；正式验收默认仍给父子任务 60 秒。
+LA_PROCESS_TIMEOUT ?= 60
+else
+build-la-switch test-la-switch build-la-process test-la-process build-la-exec test-la-exec:
+	@echo "LoongArch 专用测试只适用于 ARCH=loongarch64"; exit 1
+endif
+
+check: user $(ARCH_USER_DEP)
 	$(CARGO) check --target $(RUST_TARGET) --features $(RUST_FEATURES) $(CARGO_PROFILE_FLAG)
 
-build: user
+build: user $(ARCH_USER_DEP)
 	@mkdir -p $(BUILD_DIR)
 	$(CARGO) build --target $(RUST_TARGET) --features $(RUST_FEATURES) $(CARGO_PROFILE_FLAG)
 	@cp $(CARGO_OUT_DIR)/$(KERNEL_NAME) $(KERNEL_ELF)
@@ -105,6 +155,21 @@ user:
 	@cp user/target/riscv64gc-unknown-none-elf/release/vfs-exec $(USER_VFS_EXEC_ELF)
 	@echo "用户程序：$(USER_ELF) $(USER_ELF2) $(USER_SHELL_ELF)"
 
+## LoongArch M1.5 独立用户程序；RV 用户 crate 中的 ecall 汇编不能编给 LA。-----
+LA_USER_ELF := build/user/la-uapp.elf
+LA_PROCESS_ELF := build/user/la-process.elf
+LA_EXEC_ELF := build/user/la-exec.elf
+LA_EXEC_TARGET_ELF := build/user/la-exec-target.elf
+LA_USER_RUSTFLAGS := -C link-arg=-T$(CURDIR)/user/loongarch64/user.ld -C target-feature=-lsx,-lasx
+
+user-la:
+	@mkdir -p build/user
+	RUSTFLAGS="$(LA_USER_RUSTFLAGS)" $(CARGO) build --release --manifest-path user/loongarch64/Cargo.toml --target loongarch64-unknown-none
+	@cp user/loongarch64/target/loongarch64-unknown-none/release/la-uapp $(LA_USER_ELF)
+	@cp user/loongarch64/target/loongarch64-unknown-none/release/la-process $(LA_PROCESS_ELF)
+	@cp user/loongarch64/target/loongarch64-unknown-none/release/la-exec $(LA_EXEC_ELF)
+	@cp user/loongarch64/target/loongarch64-unknown-none/release/la-exec-target $(LA_EXEC_TARGET_ELF)
+
 ## W2 附加用例：fault 模式用户程序（make test-fault 专用）--------------------------
 
 USER_FAULT_ELF := build/user/uapp_fault.elf
@@ -138,6 +203,16 @@ RUN_ID ?= $(shell date +%Y%m%d-%H%M%S)
 test: build
 	$(PYTHON) tools/run_qemu.py --qemu $(QEMU_BIN) --flags "$(QEMU_FLAGS)" --arch $(ARCH) \
 		--mode boot --run-id $(RUN_ID)
+
+# LA M1.5：用户程序须先成功 write，再以 exit(0) 触发唯一验收标记。
+ifeq ($(ARCH),loongarch64)
+test-user: build
+	$(PYTHON) tools/run_qemu.py --qemu $(QEMU_BIN) --flags "$(QEMU_FLAGS)" --arch $(ARCH) \
+		--mode boot --timeout 30 --pattern "LA_USER_EXIT_PASS" --run-id la-user-$(RUN_ID) --elf $(KERNEL_ELF)
+else
+test-user:
+	@echo "test-user 只适用于 ARCH=loongarch64"; exit 1
+endif
 
 # G5 小 shell 演示：与 build 同构，但 kernel 侧多开 uapp-shell feature（task0 = shell.elf）。
 build-shell: user
@@ -228,11 +303,13 @@ gdb: build
 
 fmt:
 	$(CARGO) fmt
+	$(CARGO) fmt --manifest-path user/loongarch64/Cargo.toml
 
 fmt-check:
 	$(CARGO) fmt --check
+	$(CARGO) fmt --manifest-path user/loongarch64/Cargo.toml --check
 
 clean:
-	@rm -rf build target user/target
+	@rm -rf build target user/target user/loongarch64/target
 	@rm -f config/.config config/config.mk
 	@echo "已清理 build/ target/ 与生成配置"

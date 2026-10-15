@@ -4,7 +4,7 @@
 //! 用户地址写入前先准备目的页，避免 EFAULT 时已经消费文件或目录游标。
 
 use super::copy_cstring_from_user;
-use crate::fs::{self, OpenFileDesc};
+use crate::kernel::fs::{self, OpenFileDesc};
 use crate::kernel::task::{self, fd_table::FdEntry};
 use alloc::sync::Arc;
 

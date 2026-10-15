@@ -3,7 +3,7 @@
 //! fork 复制槽位而共享描述；close/exit 释放引用，最后一个引用释放描述。
 //! 控制台仍为明确的 FD 类型，VFS 不依赖任务调度和 UART 等待协议。
 
-use crate::fs::OpenFileDesc;
+use crate::kernel::fs::OpenFileDesc;
 use alloc::sync::Arc;
 use alloc::vec;
 use alloc::vec::Vec;

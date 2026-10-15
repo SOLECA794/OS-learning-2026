@@ -2,9 +2,11 @@
 
 pub mod boot;
 pub mod console;
+mod memory;
 pub mod mm;
 mod platform;
 mod power;
+pub mod task;
 pub mod trap;
 
 pub use power::{power_off, restart};

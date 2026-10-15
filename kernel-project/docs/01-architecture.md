@@ -18,7 +18,7 @@
 ├─────────────────────────────────────────────┤
 │  核心子系统      src/kernel/                 │  mm / task / sched / signal / ipc / event / time
 ├─────────────────────────────────────────────┤
-│  文件系统        src/fs/                     │  VFS 抽象 + 具体 fs（tmpfs/ext4/...）
+│  文件系统        src/kernel/fs/              │  VFS 抽象 + 具体 fs（当前 ramfs/staticfs）
 ├─────────────────────────────────────────────┤
 │  网络            src/net/                    │  socket 抽象 + 协议实现（自研，见 06）
 ├─────────────────────────────────────────────┤
@@ -67,7 +67,7 @@ arch 早期启动（汇编 + 早期映射）
 | `kernel/event/` | 事件驱动唤醒：WaitQueue、Poll、Timer | `Event` 位掩码 |
 | `kernel/ipc/` | 管道、POSIX 信号、共享内存 | — |
 | `kernel/usync/` | futex 等用户同步原语 | — |
-| `fs/` | VFS + 具体文件系统 + 页缓存 | `FileSystemOps/SuperBlockOps/InodeOps/FileOps` |
+| `kernel/fs/` | VFS 节点接口 + ramfs/staticfs；页缓存尚未实现 | `VfsNode`、`OpenFileDesc` |
 | `driver/` | FDT 设备框架 + 具体驱动 | `Device`/`Driver`、compatible 匹配 |
 | `net/` | socket + TCP/UDP + virtio-net | — |
 | `klib/` | 分配器、SpinLock、InitedCell、日志宏 | — |

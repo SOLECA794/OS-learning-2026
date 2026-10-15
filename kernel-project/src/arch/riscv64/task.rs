@@ -6,6 +6,59 @@
 
 use core::arch::global_asm;
 
+/// RISC-V 首任务沿用原有一页用户栈。
+pub const INITIAL_USER_STACK_BYTES: usize = 0x1000;
+/// RISC-V 用户栈顶保持在内核身份映射区下方。
+pub const INITIAL_USER_STACK_TOP: usize = 0x7f00_0000;
+
+/// 为首任务安装 RISC-V 定时器和外部中断路由。
+pub fn prepare_first_task(hartid: usize) {
+    super::timer::init();
+    super::interrupt::init(hartid);
+}
+
+/// 按构建测试模式选择 RISC-V 首任务 ELF。
+pub fn initial_user_image() -> &'static [u8] {
+    #[cfg(feature = "uapp-fault-test")]
+    const UAPP_ELF: &[u8] = include_bytes!("../../../build/user/uapp_fault.elf");
+    // shell、COW、console、VFS 模式互斥选择一个首任务。
+    #[cfg(all(
+        feature = "uapp-shell",
+        not(feature = "uapp-fault-test"),
+        not(feature = "uapp-cow"),
+        not(feature = "uapp-vfs"),
+        not(feature = "uapp-console")
+    ))]
+    const UAPP_ELF: &[u8] = include_bytes!("../../../build/user/shell.elf");
+    #[cfg(all(
+        feature = "uapp-cow",
+        not(feature = "uapp-shell"),
+        not(feature = "uapp-fault-test"),
+        not(feature = "uapp-vfs"),
+        not(feature = "uapp-console")
+    ))]
+    const UAPP_ELF: &[u8] = include_bytes!("../../../build/user/uapp-cow.elf");
+    #[cfg(all(
+        feature = "uapp-console",
+        not(feature = "uapp-vfs"),
+        not(feature = "uapp-shell"),
+        not(feature = "uapp-cow"),
+        not(feature = "uapp-fault-test")
+    ))]
+    const UAPP_ELF: &[u8] = include_bytes!("../../../build/user/uapp-console.elf");
+    #[cfg(all(feature = "uapp-vfs", not(feature = "uapp-fault-test")))]
+    const UAPP_ELF: &[u8] = include_bytes!("../../../build/user/uapp-vfs.elf");
+    #[cfg(all(
+        not(feature = "uapp-shell"),
+        not(feature = "uapp-fault-test"),
+        not(feature = "uapp-cow"),
+        not(feature = "uapp-vfs"),
+        not(feature = "uapp-console")
+    ))]
+    const UAPP_ELF: &[u8] = include_bytes!("../../../build/user/uapp.elf");
+    UAPP_ELF
+}
+
 /// 内核态切换现场。`repr(C)` 保证布局与汇编存取一致。
 #[repr(C)]
 #[derive(Clone, Copy)]

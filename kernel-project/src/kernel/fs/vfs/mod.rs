@@ -1,17 +1,18 @@
-//! 最小 VFS：统一路径解析与打开对象，ramfs 是当前唯一内容后端。
+//! VFS：统一路径解析与打开对象，ramfs 是当前根后端。
 //!
 //! syscall 只传入内核拥有的路径/缓冲；本层不访问 Task 和用户指针。
-//! 无 cwd/挂载/符号链接；相对路径可从根或目录 fd 起点解析。
+//! 无 cwd/用户态挂载/符号链接；相对路径可从根或目录 fd 起点解析。
 
 use crate::klib::sync::SpinLock;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 
 mod file;
-mod programs;
-mod ramfs;
+mod mount;
+pub(in crate::kernel::fs) mod node;
+use super::{ramfs, staticfs};
 pub(crate) use file::OpenFileDesc;
-use ramfs::Inode;
+use node::NodeRef;
 
 /// 与用户 ABI 数值无关的节点类型。
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -53,24 +54,24 @@ pub(crate) struct FileMetadata {
     pub size: usize,
 }
 
-const ENOENT: isize = -2;
-const EACCES: isize = -13;
-const ENOMEM: isize = -12;
-const EEXIST: isize = -17;
-const ENOTDIR: isize = -20;
-const EISDIR: isize = -21;
-const EINVAL: isize = -22;
-const ENAMETOOLONG: isize = -36;
+pub(in crate::kernel::fs) const ENOENT: isize = -2;
+pub(in crate::kernel::fs) const EACCES: isize = -13;
+pub(in crate::kernel::fs) const ENOMEM: isize = -12;
+pub(in crate::kernel::fs) const EEXIST: isize = -17;
+pub(in crate::kernel::fs) const ENOTDIR: isize = -20;
+pub(in crate::kernel::fs) const EISDIR: isize = -21;
+pub(in crate::kernel::fs) const EINVAL: isize = -22;
+pub(in crate::kernel::fs) const ENAMETOOLONG: isize = -36;
 
 pub(crate) const MAX_PATH_LEN: usize = 128;
 
 /// 根节点唯一发布位置；初始化完成后只获取 Arc，不复制树或文件内容。
-static ROOT: SpinLock<Option<Arc<Inode>>> = SpinLock::new(None);
+static ROOT: SpinLock<Option<NodeRef>> = SpinLock::new(None);
 
 /// 引导阶段构造文件树，全部初始化完成后一次性发布。
 pub(crate) fn init() {
-    let root = Inode::new(FileType::Directory);
-    for program in programs::PROGRAMS {
+    let root = ramfs::Inode::new(FileType::Directory);
+    for program in ramfs::programs::PROGRAMS {
         let inode = root
             .child(program.name.as_bytes(), Some(FileType::Regular), true)
             .expect("boot program");
@@ -93,15 +94,38 @@ pub(crate) fn init() {
             .write_at(0, bytes, false)
             .expect("boot fixture content");
     }
+    // 固定只读挂载点：目录项在 ramfs 中可见，路径穿越时切至另一后端。
+    let mountpoint = root
+        .child(b"static", Some(FileType::Directory), true)
+        .expect("static mountpoint");
+    let static_root: NodeRef = staticfs::root(mountpoint.metadata().inode_number);
+    let root_node: NodeRef = root;
+    mount::register(root_node.clone(), b"static", static_root);
     let mut slot = ROOT.lock();
     assert!(slot.is_none(), "VFS initialized twice");
-    *slot = Some(root);
+    *slot = Some(root_node);
     drop(slot);
     crate::log_info!("[fs] VFS ramfs root ready");
 }
 
-fn root() -> Arc<Inode> {
+fn root() -> NodeRef {
     ROOT.lock().as_ref().expect("VFS used before init").clone()
+}
+
+/// 根目录的 `static` 项是固定只读挂载点；目录 fd 进入后保存后端根节点。
+fn child(
+    parent: &NodeRef,
+    name: &[u8],
+    create: Option<FileType>,
+    exclusive: bool,
+) -> Result<NodeRef, isize> {
+    if let Some(mounted) = mount::resolve(parent, name) {
+        if create.is_some() && exclusive {
+            return Err(EEXIST);
+        }
+        return Ok(mounted);
+    }
+    parent.child(name, create, exclusive)
 }
 
 /// 有界逐段解析。重复斜杠合并；末尾斜杠由 open/lookup 检查目录类型。
@@ -127,19 +151,19 @@ fn components(path: &[u8]) -> Result<Vec<&[u8]>, isize> {
 }
 
 /// 逐段克隆节点句柄后释放父目录锁，不携带锁跨越整条路径。
-fn walk_from(mut inode: Arc<Inode>, parts: &[&[u8]]) -> Result<Arc<Inode>, isize> {
+fn walk_from(mut inode: NodeRef, parts: &[&[u8]]) -> Result<NodeRef, isize> {
     for name in parts {
-        inode = inode.child(name, None, false)?;
+        inode = child(&inode, name, None, false)?;
     }
     Ok(inode)
 }
 
-fn walk(parts: &[&[u8]]) -> Result<Arc<Inode>, isize> {
+fn walk(parts: &[&[u8]]) -> Result<NodeRef, isize> {
     walk_from(root(), parts)
 }
 
 /// 绝对路径与临时根 cwd 使用根节点；相对目录 fd 必须确实指向目录。
-fn path_start(path: &[u8], dir: Option<&OpenFileDesc>) -> Result<Arc<Inode>, isize> {
+fn path_start(path: &[u8], dir: Option<&OpenFileDesc>) -> Result<NodeRef, isize> {
     if path.starts_with(b"/") {
         Ok(root())
     } else if let Some(dir) = dir {
@@ -165,7 +189,7 @@ pub(crate) fn open_at(
         } else {
             None
         };
-        parent.child(name, create, options.create && options.exclusive)?
+        child(&parent, name, create, options.create && options.exclusive)?
     } else {
         if options.create {
             return Err(EISDIR);
@@ -189,7 +213,8 @@ pub(crate) fn open_at(
 pub(crate) fn mkdir_at(path: &[u8], dir: Option<&OpenFileDesc>) -> Result<(), isize> {
     let parts = components(path)?;
     let (name, parents) = parts.split_last().ok_or(EEXIST)?;
-    walk_from(path_start(path, dir)?, parents)?.child(name, Some(FileType::Directory), true)?;
+    let parent = walk_from(path_start(path, dir)?, parents)?;
+    child(&parent, name, Some(FileType::Directory), true)?;
     Ok(())
 }
 

@@ -25,7 +25,7 @@ pub use self::riscv64::{
 mod loongarch64;
 #[cfg(feature = "arch-loongarch64")]
 pub use self::loongarch64::{
-    console, mm, park, power_off, restart, trap, trap::TrapContext, ARCH_NAME, LINK_BASE,
+    console, mm, park, power_off, restart, task, trap, trap::TrapContext, ARCH_NAME, LINK_BASE,
 };
 
 /// 公共映射权限传给架构 PTE 编码器时使用的窄接口。

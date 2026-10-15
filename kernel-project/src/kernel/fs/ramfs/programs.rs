@@ -10,19 +10,25 @@ pub struct Program {
 /// 程序注册表：uapp/uapp2 为正常用户程序；bad 为故意损坏的 ELF
 /// （exec 失败保留旧进程验收用例）。
 pub static PROGRAMS: &[Program] = &[
+    // LA exec 测试的目标 ELF；只在该架构发布，避免误执行异构指令。
+    #[cfg(feature = "arch-loongarch64")]
+    Program {
+        name: "la-exec-target",
+        elf: include_bytes!("../../../../build/user/la-exec-target.elf"),
+    },
     // VFS 定向测试源：由用户程序复制到子目录后 exec，验证 argv 和退出码。
     #[cfg(feature = "uapp-vfs")]
     Program {
         name: "vfs-exec",
-        elf: include_bytes!("../../build/user/vfs-exec.elf"),
+        elf: include_bytes!("../../../../build/user/vfs-exec.elf"),
     },
     Program {
         name: "uapp",
-        elf: include_bytes!("../../build/user/uapp.elf"),
+        elf: include_bytes!("../../../../build/user/uapp.elf"),
     },
     Program {
         name: "uapp2",
-        elf: include_bytes!("../../build/user/uapp2.elf"),
+        elf: include_bytes!("../../../../build/user/uapp2.elf"),
     },
     // 64 字节 0xff：魔数错误 → ElfError::BadMagic → exec 返回 -ENOEXEC。
     Program {
