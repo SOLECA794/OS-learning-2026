@@ -124,5 +124,7 @@ QEMU_FLAGS := -machine $(QEMU_MACHINE) \
               -m $(QEMU_MEMORY_MB)M \
               -nographic \
               -serial mon:stdio \
+              -drive file=disk.img,if=none,id=disk0 \
+              -device virtio-blk-device,drive=disk0 \
               $(QEMU_FIRMWARE) \
               $(if $(KERNEL_CMDLINE),-append "$(KERNEL_CMDLINE)")
