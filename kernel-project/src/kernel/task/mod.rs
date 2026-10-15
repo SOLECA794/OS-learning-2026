@@ -361,12 +361,23 @@ pub(crate) fn boot_tasks(hartid: usize) -> ! {
     const UAPP_ELF: &[u8] = include_bytes!("../../../build/user/uapp-console.elf");
     #[cfg(all(feature = "uapp-vfs", not(feature = "uapp-fault-test")))]
     const UAPP_ELF: &[u8] = include_bytes!("../../../build/user/uapp-vfs.elf");
+    // P0 brk 验收模式（make test-brk）：task0 = uapp-brk.elf。
     #[cfg(all(
+        feature = "uapp-brk",
         not(feature = "uapp-shell"),
         not(feature = "uapp-fault-test"),
         not(feature = "uapp-cow"),
         not(feature = "uapp-vfs"),
         not(feature = "uapp-console")
+    ))]
+    const UAPP_ELF: &[u8] = include_bytes!("../../../build/user/uapp-brk.elf");
+    #[cfg(all(
+        not(feature = "uapp-shell"),
+        not(feature = "uapp-fault-test"),
+        not(feature = "uapp-cow"),
+        not(feature = "uapp-vfs"),
+        not(feature = "uapp-console"),
+        not(feature = "uapp-brk")
     ))]
     const UAPP_ELF: &[u8] = include_bytes!("../../../build/user/uapp.elf");
     let uapp: &[u8] = UAPP_ELF;

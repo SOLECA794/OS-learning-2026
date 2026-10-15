@@ -177,6 +177,10 @@ pub struct MemorySet {
     areas: [Option<MapArea>; MAX_MAP_AREAS],
     /// 处于 COW 共享状态的用户虚拟页（写时复制：PTE 已清写位，集合与 PTE 同域维护）。
     cow_pages: BTreeSet<VirtPageNum>,
+    /// 用户堆起始地址（页对齐），brk 扩展从此处向上增长。
+    heap_base: VirtAddr,
+    /// 当前堆结束地址（program break）；初始等于 heap_base。
+    heap_brk: VirtAddr,
 }
 
 impl MemorySet {
@@ -186,6 +190,8 @@ impl MemorySet {
             page_table: PageTable::new()?,
             areas: [None; MAX_MAP_AREAS],
             cow_pages: BTreeSet::new(),
+            heap_base: VirtAddr::new(0),
+            heap_brk: VirtAddr::new(0),
         })
     }
 
@@ -221,6 +227,10 @@ impl MemorySet {
             MapType::Framed,
             MapPermission::READ | MapPermission::WRITE | MapPermission::USER,
         )?)?;
+        // 用户堆：从 0x2000_0000 开始向上增长，初始为空（brk == heap_base）。
+        // 避开 0x1000_0000（QEMU UART0 MMIO）和 PLIC（0x0c00_0000）。
+        memory_set.heap_base = VirtAddr::new(0x2000_0000);
+        memory_set.heap_brk = memory_set.heap_base;
         Ok(memory_set)
     }
 
@@ -441,6 +451,51 @@ impl MemorySet {
     #[allow(dead_code)]
     pub(crate) fn cow_contains(&self, vpn: VirtPageNum) -> bool {
         self.cow_pages.contains(&vpn)
+    }
+
+    /// brk(2)：设置 program break。
+    ///
+    /// - `new_brk == 0`：返回当前 brk，不改变映射。
+    /// - `new_brk > heap_brk`：向上扩展堆，逐页分配物理帧并映射 RW 用户页。
+    /// - `new_brk < heap_brk`：向下收缩堆，逐页 unmap 并释放物理帧。
+    /// - `new_brk < heap_base`：拒绝，返回当前 brk。
+    ///
+    /// 返回实际 brk 地址（成功后等于 new_brk 的页对齐值）。
+    pub(crate) fn brk(&mut self, new_brk: usize) -> Result<usize, MemoryError> {
+        if new_brk == 0 {
+            return Ok(self.heap_brk.value());
+        }
+        let target = VirtAddr::new(new_brk);
+        if target < self.heap_base {
+            return Ok(self.heap_brk.value());
+        }
+        if target > self.heap_brk {
+            // 向上扩展：逐页分配并映射。
+            let start_vpn = self.heap_brk.ceil()?;
+            let end_vpn = target.ceil()?;
+            let mut vpn = start_vpn;
+            while vpn < end_vpn {
+                let frame = frame_allocator::allocate()?;
+                self.page_table
+                    .map(vpn, frame.ppn(), MapPermission::READ | MapPermission::WRITE | MapPermission::USER, MemoryType::Normal)?;
+                let _ = frame.into_ppn();
+                vpn = vpn.checked_add(1)?;
+            }
+        } else if target < self.heap_brk {
+            // 向下收缩：逐页 unmap 并释放。
+            let start_vpn = target.ceil()?;
+            let end_vpn = self.heap_brk.ceil()?;
+            let mut vpn = start_vpn;
+            while vpn < end_vpn {
+                if let Ok(ppn) = self.page_table.unmap(vpn) {
+                    // SAFETY: 堆页是独占 Framed 映射，不参与 COW 共享。
+                    unsafe { frame_allocator::deallocate(ppn) };
+                }
+                vpn = vpn.checked_add(1).expect("brk shrink vpn overflow");
+            }
+        }
+        self.heap_brk = target;
+        Ok(self.heap_brk.value())
     }
 
     /// 把已映射的用户可读页复制到内核拥有的缓冲区，不向外暴露用户页借用。

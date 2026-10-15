@@ -35,6 +35,7 @@ uapp-shell = []
 uapp-cow = []
 uapp-console = []
 uapp-vfs = []
+uapp-brk = []
 # M2.8 启动自检：仅经 make test-cow-oom 启用一次性物理帧故障注入。
 m28-frame-fault-test = []
 

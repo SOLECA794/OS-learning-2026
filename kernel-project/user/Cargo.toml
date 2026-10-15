@@ -29,3 +29,6 @@ path = "src/bin/uapp-vfs.rs"
 [[bin]]
 name = "vfs-exec"
 path = "src/bin/vfs-exec.rs"
+[[bin]]
+name = "uapp-brk"
+path = "src/bin/uapp-brk.rs"

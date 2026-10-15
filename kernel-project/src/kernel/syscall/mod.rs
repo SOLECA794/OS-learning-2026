@@ -22,6 +22,7 @@ pub const SYSCALL_PREAD64: usize = 67;
 pub const SYSCALL_PWRITE64: usize = 68;
 pub const SYSCALL_FSTAT: usize = 80;
 pub const SYSCALL_GETDENTS64: usize = 217;
+pub const SYSCALL_BRK: usize = 214;
 
 #[cfg(feature = "arch-riscv64")]
 mod exec;
@@ -37,6 +38,7 @@ use power::sys_reboot;
 const ENOSYS: isize = 38;
 const EFAULT: isize = -14;
 const ECHILD: isize = -10;
+const ENOMEM: isize = -12;
 /// wait4 options：WNOHANG（非阻塞）。
 const WNOHANG: usize = 1;
 
@@ -83,6 +85,12 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
         // wait4(pid, wstatus, options, rusage)：仅 pid/wstatus/options，rusage 忽略。
         #[cfg(feature = "arch-riscv64")]
         SYSCALL_WAIT4 => sys_wait4(args[0], args[1], args[2]),
+        // brk(new_brk)：设置 program break；new_brk=0 返回当前 break。
+        #[cfg(feature = "arch-riscv64")]
+        SYSCALL_BRK => match crate::kernel::task::with_current_space(|space| space.brk(args[0])) {
+            Some(Ok(addr)) => addr as isize,
+            _ => -ENOMEM,
+        },
         _ => -ENOSYS,
     }
 }
