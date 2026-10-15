@@ -31,6 +31,7 @@ pub fn init() {
 
 /// 占位：LA 用户态功能后置（M1.5 边界，RV 验证通过后移植）。
 /// 当前无用户任务，sscratch 语义不适用，保持空实现。
+#[allow(dead_code)]
 pub fn set_user_scratch(_value: usize) {}
 
 /// 占位：LA 用户态功能后置；调用即停驻（不会真正进入用户态）。

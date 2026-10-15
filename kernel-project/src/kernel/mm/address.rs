@@ -17,6 +17,7 @@ const PAGE_MASK: usize = PAGE_SIZE - 1;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AddressError {
     /// 调用者要求整页地址，但地址仍带有页内偏移。
+    #[allow(dead_code)]
     Unaligned,
     /// 加法或向上取整超过了 `usize` 能表示的范围。
     Overflow,
@@ -34,6 +35,9 @@ macro_rules! define_address {
         #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
         pub struct $name(usize);
 
+        // 强类型地址的完整运算 API（对齐/取整/偏移）：当前未全部使用，
+        // 但作为物理/虚拟地址的统一接口保留，供后续路径与 LA 侧使用。
+        #[allow(dead_code)]
         impl $name {
             /// 从原始整数构造地址；不隐式要求页对齐。
             pub const fn new(value: usize) -> Self {
@@ -100,6 +104,8 @@ macro_rules! define_address {
         #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
         pub struct $page(usize);
 
+        // 页号运算 API 与字节地址保持一致；部分方法当前未使用，保留作统一接口。
+        #[allow(dead_code)]
         impl $page {
             /// 从原始页号构造强类型值。
             pub const fn new(value: usize) -> Self {
@@ -169,11 +175,13 @@ impl AddressRange<VirtAddr> {
     }
 
     /// 返回区间的字节长度。
+    #[allow(dead_code)]
     pub const fn len(self) -> usize {
         self.end.value() - self.start.value()
     }
 
     /// 判断区间是否不包含任何字节。
+    #[allow(dead_code)]
     pub const fn is_empty(self) -> bool {
         self.start.value() == self.end.value()
     }

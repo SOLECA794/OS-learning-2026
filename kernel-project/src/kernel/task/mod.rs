@@ -218,6 +218,9 @@ pub(crate) fn launch_first(task: TaskControlBlock) -> (usize, *const arch::trap:
 }
 
 /// 把一个任务放入就绪队列（队尾）。
+///
+/// 当前调度由时钟中断统一触发，显式入队接口保留作未来抢占/线程库扩展。
+#[allow(dead_code)]
 pub(crate) fn push_ready(task: TaskControlBlock) {
     let mut sched = SCHED.lock();
     let id = sched.push(task);
@@ -392,6 +395,7 @@ pub(crate) fn with_current_fds<R>(f: impl FnOnce(&mut fd_table::FdTable) -> R) -
 }
 
 /// 当前任务 id（日志/诊断用）。
+#[allow(dead_code)]
 pub(crate) fn current_pid() -> usize {
     let sched = SCHED.lock();
     sched.current

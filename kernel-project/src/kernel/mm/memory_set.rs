@@ -280,6 +280,10 @@ impl MemorySet {
     /// Identity 区域（内核映射等）跳过、按参数重建一次内核映射。
     ///
     /// 注意：不触发 TLB 操作，调用方需在激活后按需刷新。
+    ///
+    /// 旧的全量复制路径：逐页拷贝内容。COW 落地后由 `dup_cow` 取代，
+    /// 保留作调试对照与未来非 COW fork 场景。
+    #[allow(dead_code)]
     pub fn dup(
         &self,
         layout: KernelImageLayout,
@@ -432,6 +436,9 @@ impl MemorySet {
     }
 
     /// 查询虚拟页是否处于 COW 共享状态（trap 分发用）。
+    ///
+    /// 默认构建不直接调用；仅在 `m28-frame-fault-test` 故障注入测试中使用。
+    #[allow(dead_code)]
     pub(crate) fn cow_contains(&self, vpn: VirtPageNum) -> bool {
         self.cow_pages.contains(&vpn)
     }

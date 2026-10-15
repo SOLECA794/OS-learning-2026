@@ -35,7 +35,6 @@ use power::sys_reboot;
 
 /// Linux errno。
 const ENOSYS: isize = 38;
-const EBADF: isize = -9;
 const EFAULT: isize = -14;
 const ECHILD: isize = -10;
 /// wait4 options：WNOHANG（非阻塞）。

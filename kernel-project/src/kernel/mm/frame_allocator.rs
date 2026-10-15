@@ -410,9 +410,15 @@ pub(super) unsafe fn deallocate(ppn: PhysPageNum) {
 ///
 /// 未登记页首次进入共享时计数从 1（原独占者）跳到 2；此后每次 retain +1。
 /// 调用方必须保证该页当前已被某映射持有，且本调用对应一个新的共享映射。
+///
+/// 锁顺序：FRAME_REFS 与 FRAME_ALLOCATOR 不可嵌套持有；retain/deallocate_cow
+/// 只取 FRAME_REFS，真正归还时才 drop 后再取 FRAME_ALLOCATOR。
 pub(crate) fn cow_retain(ppn: PhysPageNum) {
     let mut refs = FRAME_REFS.lock();
-    *refs.entry(ppn.value()).or_insert(1) += 1;
+    let entry = refs.entry(ppn.value()).or_insert(1);
+    *entry += 1;
+    // 合理上限：单页被超过 64 个映射共享通常意味着引用计数配对出错。
+    debug_assert!(*entry <= 64, "cow_retain: ppn={:?} ref count overflow {}", ppn, *entry);
 }
 
 /// COW 感知释放：释放调用方持有的一个映射引用。
@@ -426,6 +432,7 @@ pub(super) unsafe fn deallocate_cow(ppn: PhysPageNum) {
     let mut refs = FRAME_REFS.lock();
     match refs.get_mut(&ppn.value()) {
         Some(count) => {
+            debug_assert!(*count >= 1, "deallocate_cow: ppn={:?} ref count already 0", ppn);
             *count -= 1;
             if *count == 0 {
                 refs.remove(&ppn.value());
