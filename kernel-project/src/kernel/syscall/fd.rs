@@ -72,6 +72,7 @@ fn directory_base(dirfd: usize, path: &[u8]) -> Result<Option<Arc<OpenFileDesc>>
     match entry(dirfd)? {
         FdEntry::File(desc) => Ok(Some(desc)),
         FdEntry::ConsoleInput | FdEntry::ConsoleOutput => Err(ENOTDIR),
+        FdEntry::PipeRead(_) | FdEntry::PipeWrite(_) => Err(ENOTDIR),
     }
 }
 
@@ -95,6 +96,7 @@ pub fn sys_fstat(fd: usize, stat_ptr: usize) -> isize {
     const S_IFREG: u32 = 0o100000;
     const S_IFDIR: u32 = 0o040000;
     const S_IFCHR: u32 = 0o020000;
+    const S_IFIFO: u32 = 0o010000;
     let (ino, mode, size) = match target {
         FdEntry::File(desc) => {
             let meta = desc.metadata();
@@ -105,6 +107,7 @@ pub fn sys_fstat(fd: usize, stat_ptr: usize) -> isize {
             (meta.inode_number, mode, meta.size)
         }
         FdEntry::ConsoleInput | FdEntry::ConsoleOutput => (0, S_IFCHR, 0),
+        FdEntry::PipeRead(_) | FdEntry::PipeWrite(_) => (0, S_IFIFO, 0),
     };
     if size > isize::MAX as usize {
         return -75; // EOVERFLOW：st_size 是有符号 64 位。
@@ -127,6 +130,7 @@ pub fn sys_lseek(fd: usize, offset: i64, whence: usize) -> isize {
     let desc = match entry(fd) {
         Ok(FdEntry::File(desc)) => desc,
         Ok(FdEntry::ConsoleInput | FdEntry::ConsoleOutput) => return ESPIPE,
+        Ok(FdEntry::PipeRead(_) | FdEntry::PipeWrite(_)) => return ESPIPE,
         Err(e) => return e,
     };
     let origin = match whence {
@@ -181,6 +185,18 @@ pub fn sys_read(fd: usize, buf: usize, len: usize) -> isize {
         // 保留现有 stdout/stderr read 返回 EOF 的行为。
         Ok(FdEntry::ConsoleOutput) => return 0,
         Ok(FdEntry::File(desc)) => desc,
+        Ok(FdEntry::PipeRead(pipe)) => {
+            let count = len.min(crate::kernel::mm::address::PAGE_SIZE);
+            if let Err(e) = prepare_output(buf, count) {
+                return e;
+            }
+            let mut bytes = alloc::vec![0u8; count];
+            let n = pipe.read(&mut bytes);
+            return super::copy_bytes_to_user(buf, &bytes[..n])
+                .map(|_| n as isize)
+                .unwrap_or_else(|e| e);
+        }
+        Ok(FdEntry::PipeWrite(_)) => return EISDIR,
         Err(e) => return e,
     };
     if desc.is_dir() {
@@ -194,6 +210,7 @@ pub fn sys_pread64(fd: usize, buf: usize, len: usize, offset: i64) -> isize {
     let desc = match entry(fd) {
         Ok(FdEntry::File(desc)) => desc,
         Ok(FdEntry::ConsoleInput | FdEntry::ConsoleOutput) => return ESPIPE,
+        Ok(FdEntry::PipeRead(_) | FdEntry::PipeWrite(_)) => return ESPIPE,
         Err(e) => return e,
     };
     if desc.is_dir() {
@@ -251,6 +268,8 @@ pub fn sys_write(fd: usize, buf: usize, len: usize) -> isize {
             bytes.len() as isize
         }
         FdEntry::File(desc) => desc.write(&bytes).map(|n| n as isize).unwrap_or_else(|e| e),
+        FdEntry::PipeWrite(pipe) => pipe.write(&bytes) as isize,
+        FdEntry::PipeRead(_) => -EINVAL,
     }
 }
 
@@ -259,6 +278,7 @@ pub fn sys_pwrite64(fd: usize, buf: usize, len: usize, offset: i64) -> isize {
     let desc = match entry(fd) {
         Ok(FdEntry::File(desc)) => desc,
         Ok(FdEntry::ConsoleInput | FdEntry::ConsoleOutput) => return ESPIPE,
+        Ok(FdEntry::PipeRead(_) | FdEntry::PipeWrite(_)) => return ESPIPE,
         Err(e) => return e,
     };
     if desc.is_dir() {
@@ -284,6 +304,42 @@ pub fn sys_dup(fd: usize) -> isize {
     })
     .map(|fd| fd as isize)
     .unwrap_or_else(|e| e)
+}
+
+/// dup2(oldfd, newfd)：把 oldfd 复制到 newfd；newfd 已有则先关闭。
+pub fn sys_dup2(oldfd: usize, newfd: usize) -> isize {
+    task::with_current_fds(|fds| {
+        let entry = fds.get(oldfd).cloned().ok_or(EBADF)?;
+        if oldfd == newfd {
+            return Ok(newfd as isize);
+        }
+        fds.set(newfd, entry)?;
+        Ok(newfd as isize)
+    })
+    .unwrap_or_else(|e| e)
+}
+
+/// pipe(fds_ptr)：创建管道，fds[0]=读端，fds[1]=写端。
+pub fn sys_pipe(fds_ptr: usize) -> isize {
+    use crate::kernel::fs::Pipe;
+    let pipe = Pipe::new();
+    let result = task::with_current_fds(|fds| {
+        let read_fd = fds.alloc(FdEntry::PipeRead(pipe.clone()))?;
+        let write_fd = fds.alloc(FdEntry::PipeWrite(pipe.clone()))?;
+        Ok([read_fd, write_fd])
+    });
+    match result {
+        Ok([r, w]) => {
+            if super::copy_bytes_to_user(fds_ptr, &(r as u32).to_ne_bytes()).is_err() {
+                return super::EFAULT;
+            }
+            if super::copy_bytes_to_user(fds_ptr + 4, &(w as u32).to_ne_bytes()).is_err() {
+                return super::EFAULT;
+            }
+            0
+        }
+        Err(e) => e,
+    }
 }
 
 /// 非目录为 ENOTDIR；缓冲放不下一个完整记录为 EINVAL，EOF 为 0。

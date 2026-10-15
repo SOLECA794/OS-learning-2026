@@ -1,9 +1,11 @@
 //! 内核文件系统入口：VFS 拥有路径与打开描述，ramfs/静态树是后端。
 
+mod pipe;
 pub(crate) mod ramfs;
 pub(crate) mod staticfs;
 mod vfs;
 
+pub(crate) use pipe::Pipe;
 pub(crate) use vfs::{
     mkdir_at, open_at, read_file, FileType, OpenFileDesc, OpenOptions, SeekWhence, MAX_PATH_LEN,
 };

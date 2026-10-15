@@ -13,6 +13,8 @@ pub const SYSCALL_FORK: usize = 220;
 pub const SYSCALL_WAIT4: usize = 260;
 pub const SYSCALL_EXECVE: usize = 221;
 pub const SYSCALL_DUP: usize = 23;
+pub const SYSCALL_DUP2: usize = 24;
+pub const SYSCALL_PIPE: usize = 59;
 pub const SYSCALL_MKDIRAT: usize = 34;
 pub const SYSCALL_OPENAT: usize = 56;
 pub const SYSCALL_CLOSE: usize = 57;
@@ -22,6 +24,9 @@ pub const SYSCALL_PREAD64: usize = 67;
 pub const SYSCALL_PWRITE64: usize = 68;
 pub const SYSCALL_FSTAT: usize = 80;
 pub const SYSCALL_GETDENTS64: usize = 217;
+pub const SYSCALL_BRK: usize = 214;
+pub const SYSCALL_MUNMAP: usize = 215;
+pub const SYSCALL_MMAP: usize = 222;
 
 mod exec;
 #[cfg(feature = "arch-riscv64")]
@@ -36,6 +41,8 @@ const ENOSYS: isize = 38;
 const EBADF: isize = -9;
 const EFAULT: isize = -14;
 const ECHILD: isize = -10;
+const ENOMEM: isize = -12;
+const EINVAL: isize = -22;
 /// wait4 options：WNOHANG（非阻塞）。
 const WNOHANG: usize = 1;
 
@@ -71,6 +78,10 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
         #[cfg(feature = "arch-riscv64")]
         SYSCALL_DUP => fd::sys_dup(args[0]),
         #[cfg(feature = "arch-riscv64")]
+        SYSCALL_DUP2 => fd::sys_dup2(args[0], args[1]),
+        #[cfg(feature = "arch-riscv64")]
+        SYSCALL_PIPE => fd::sys_pipe(args[0]),
+        #[cfg(feature = "arch-riscv64")]
         SYSCALL_GETDENTS64 => fd::sys_getdents64(args[0], args[1], args[2]),
         // 两个架构都由共享 task owner 处理进程生命周期。
         SYSCALL_EXIT => crate::kernel::task::exit_current(args[0] as i32),
@@ -81,6 +92,28 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
         },
         // wait4(pid, wstatus, options, rusage)：仅 pid/wstatus/options，rusage 忽略。
         SYSCALL_WAIT4 => sys_wait4(args[0], args[1], args[2]),
+        // brk(new_brk)：设置 program break；new_brk=0 返回当前 break。
+        #[cfg(feature = "arch-riscv64")]
+        SYSCALL_BRK => match crate::kernel::task::with_current_space(|space| space.brk(args[0])) {
+            Some(Ok(addr)) => addr as isize,
+            _ => -ENOMEM,
+        },
+        // mmap(addr, len, prot, flags, fd, offset)：当前只支持匿名 RW 映射。
+        #[cfg(feature = "arch-riscv64")]
+        SYSCALL_MMAP => {
+            match crate::kernel::task::with_current_space(|space| space.mmap_anon(args[1])) {
+                Some(Ok(addr)) => addr as isize,
+                _ => -ENOMEM,
+            }
+        }
+        // munmap(addr, len)：按起始地址解除映射。
+        #[cfg(feature = "arch-riscv64")]
+        SYSCALL_MUNMAP => {
+            match crate::kernel::task::with_current_space(|space| space.munmap(args[0], args[1])) {
+                Some(Ok(())) => 0,
+                _ => -EINVAL,
+            }
+        }
         _ => -ENOSYS,
     }
 }

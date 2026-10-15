@@ -6,9 +6,13 @@
 
 ```
 OS-learning/
-├── kernel-project/     # 竞赛内核项目治理文件（基础 + 设计 + 开发，见其 README）
-├── sdd-governance/     # SDD 开发治理体系（AGENTS.md + skills + templates）
-└── T2026*…/            # 参考项目（2026 操作系统大赛一等奖作品，git submodule）
+├── README.md             # 本文件：仓库总览
+├── ROADMAP.md            # 当前阶段 + 下一阶段
+├── CHANGELOG.md          # 汇总变更（按 commit 倒序）
+├── CONTRIBUTING.md       # 协作约定（分支/提交/测试）
+├── kernel-project/       # 竞赛内核项目治理文件（基础 + 设计 + 开发，见其 README）
+├── sdd-governance/       # SDD 开发治理体系（AGENTS.md + skills + templates）
+└── T2026*…/              # 参考项目（2026 操作系统大赛一等奖作品，git submodule）
 ```
 
 ## 参考项目（submodule）

@@ -41,6 +41,7 @@ impl KernelStack {
     }
 
     /// 返回内核栈固定容量，单位为字节。
+    #[allow(dead_code)]
     pub const fn size(&self) -> usize {
         KERNEL_STACK_SIZE
     }

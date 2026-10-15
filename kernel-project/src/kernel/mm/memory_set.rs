@@ -177,6 +177,12 @@ pub struct MemorySet {
     areas: [Option<MapArea>; MAX_MAP_AREAS],
     /// 处于 COW 共享状态的用户虚拟页（写时复制：PTE 已清写位，集合与 PTE 同域维护）。
     cow_pages: BTreeSet<VirtPageNum>,
+    /// 用户堆起始地址（页对齐），brk 扩展从此处向上增长。
+    heap_base: VirtAddr,
+    /// 当前堆结束地址（program break）；初始等于 heap_base。
+    heap_brk: VirtAddr,
+    /// mmap 匿名映射当前顶部（页对齐）；从 mmap_base 向上 bump 增长。
+    mmap_top: VirtAddr,
 }
 
 impl MemorySet {
@@ -186,6 +192,9 @@ impl MemorySet {
             page_table: PageTable::new()?,
             areas: [None; MAX_MAP_AREAS],
             cow_pages: BTreeSet::new(),
+            heap_base: VirtAddr::new(0),
+            heap_brk: VirtAddr::new(0),
+            mmap_top: VirtAddr::new(0),
         })
     }
 
@@ -221,6 +230,12 @@ impl MemorySet {
             MapType::Framed,
             MapPermission::READ | MapPermission::WRITE | MapPermission::USER,
         )?)?;
+        // 用户堆：从 0x2000_0000 开始向上增长，初始为空（brk == heap_base）。
+        // 避开 0x1000_0000（QEMU UART0 MMIO）和 PLIC（0x0c00_0000）。
+        memory_set.heap_base = VirtAddr::new(0x2000_0000);
+        memory_set.heap_brk = memory_set.heap_base;
+        // mmap 匿名映射：从 0x4000_0000 向上 bump 增长，栈顶 0x7f00_0000 之下。
+        memory_set.mmap_top = VirtAddr::new(0x4000_0000);
         Ok(memory_set)
     }
 
@@ -280,6 +295,10 @@ impl MemorySet {
     /// Identity 区域（内核映射等）跳过、按参数重建一次内核映射。
     ///
     /// 注意：不触发 TLB 操作，调用方需在激活后按需刷新。
+    ///
+    /// 旧的全量复制路径：逐页拷贝内容。COW 落地后由 `dup_cow` 取代，
+    /// 保留作调试对照与未来非 COW fork 场景。
+    #[allow(dead_code)]
     pub fn dup(
         &self,
         layout: KernelImageLayout,
@@ -432,8 +451,82 @@ impl MemorySet {
     }
 
     /// 查询虚拟页是否处于 COW 共享状态（trap 分发用）。
+    ///
+    /// 默认构建不直接调用；仅在 `m28-frame-fault-test` 故障注入测试中使用。
+    #[allow(dead_code)]
     pub(crate) fn cow_contains(&self, vpn: VirtPageNum) -> bool {
         self.cow_pages.contains(&vpn)
+    }
+
+    /// brk(2)：设置 program break。
+    ///
+    /// - `new_brk == 0`：返回当前 brk，不改变映射。
+    /// - `new_brk > heap_brk`：向上扩展堆，逐页分配物理帧并映射 RW 用户页。
+    /// - `new_brk < heap_brk`：向下收缩堆，逐页 unmap 并释放物理帧。
+    /// - `new_brk < heap_base`：拒绝，返回当前 brk。
+    ///
+    /// 返回实际 brk 地址（成功后等于 new_brk 的页对齐值）。
+    pub(crate) fn brk(&mut self, new_brk: usize) -> Result<usize, MemoryError> {
+        if new_brk == 0 {
+            return Ok(self.heap_brk.value());
+        }
+        let target = VirtAddr::new(new_brk);
+        if target < self.heap_base {
+            return Ok(self.heap_brk.value());
+        }
+        if target > self.heap_brk {
+            // 向上扩展：逐页分配并映射。
+            let start_vpn = self.heap_brk.ceil()?;
+            let end_vpn = target.ceil()?;
+            let mut vpn = start_vpn;
+            while vpn < end_vpn {
+                let frame = frame_allocator::allocate()?;
+                self.page_table.map(
+                    vpn,
+                    frame.ppn(),
+                    MapPermission::READ | MapPermission::WRITE | MapPermission::USER,
+                    MemoryType::Normal,
+                )?;
+                let _ = frame.into_ppn();
+                vpn = vpn.checked_add(1)?;
+            }
+        } else if target < self.heap_brk {
+            // 向下收缩：逐页 unmap 并释放。
+            let start_vpn = target.ceil()?;
+            let end_vpn = self.heap_brk.ceil()?;
+            let mut vpn = start_vpn;
+            while vpn < end_vpn {
+                if let Ok(ppn) = self.page_table.unmap(vpn) {
+                    // SAFETY: 堆页是独占 Framed 映射，不参与 COW 共享。
+                    unsafe { frame_allocator::deallocate(ppn) };
+                }
+                vpn = vpn.checked_add(1).expect("brk shrink vpn overflow");
+            }
+        }
+        self.heap_brk = target;
+        Ok(self.heap_brk.value())
+    }
+
+    /// mmap 匿名映射：从 mmap_top 向上分配 len 字节（页对齐），RW 用户页。
+    /// 返回映射起始地址。
+    pub(crate) fn mmap_anon(&mut self, len: usize) -> Result<usize, MemoryError> {
+        let len = VirtAddr::new(len).ceil()?.value();
+        let start = self.mmap_top;
+        let end = VirtAddr::new(start.value() + len);
+        let range = AddressRange::new(start, end)?;
+        let area = MapArea::new(
+            range,
+            MapType::Framed,
+            MapPermission::READ | MapPermission::WRITE | MapPermission::USER,
+        )?;
+        self.insert(area)?;
+        self.mmap_top = end;
+        Ok(start.value())
+    }
+
+    /// munmap：按起始地址删除映射并释放物理页。
+    pub(crate) fn munmap(&mut self, addr: usize, len: usize) -> Result<(), MemoryError> {
+        self.remove(VirtAddr::new(addr))
     }
 
     /// 把已映射的用户可读页复制到内核拥有的缓冲区，不向外暴露用户页借用。

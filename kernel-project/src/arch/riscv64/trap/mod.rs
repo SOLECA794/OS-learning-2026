@@ -28,6 +28,10 @@ pub fn init() {
 }
 
 /// 设置 sscratch（M1.5 用户态切换协议：用户态运行时 = 当前任务内核栈顶）。
+///
+/// 当前切换路径在 trap 入口直接读 stvec/sscratch，此显式写入接口保留作
+/// 未来线程库或手动切换时使用。
+#[allow(dead_code)]
 pub fn set_user_scratch(value: usize) {
     // SAFETY: 写架构 CSR，无前置条件。
     unsafe {

@@ -7,6 +7,7 @@ extern crate alloc;
 mod klib;
 
 mod arch;
+mod drivers;
 mod kernel;
 
 use core::panic::PanicInfo;

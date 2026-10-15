@@ -48,12 +48,22 @@ pub fn initial_user_image() -> &'static [u8] {
     const UAPP_ELF: &[u8] = include_bytes!("../../../build/user/uapp-console.elf");
     #[cfg(all(feature = "uapp-vfs", not(feature = "uapp-fault-test")))]
     const UAPP_ELF: &[u8] = include_bytes!("../../../build/user/uapp-vfs.elf");
+    // master 新增的 brk、pipe、mmap 定向程序仍由 RISC-V 架构入口选择。
+    #[cfg(feature = "uapp-brk")]
+    const UAPP_ELF: &[u8] = include_bytes!("../../../build/user/uapp-brk.elf");
+    #[cfg(feature = "uapp-pipe")]
+    const UAPP_ELF: &[u8] = include_bytes!("../../../build/user/uapp-pipe.elf");
+    #[cfg(feature = "uapp-mmap")]
+    const UAPP_ELF: &[u8] = include_bytes!("../../../build/user/uapp-mmap.elf");
     #[cfg(all(
         not(feature = "uapp-shell"),
         not(feature = "uapp-fault-test"),
         not(feature = "uapp-cow"),
         not(feature = "uapp-vfs"),
-        not(feature = "uapp-console")
+        not(feature = "uapp-console"),
+        not(feature = "uapp-brk"),
+        not(feature = "uapp-pipe"),
+        not(feature = "uapp-mmap")
     ))]
     const UAPP_ELF: &[u8] = include_bytes!("../../../build/user/uapp.elf");
     UAPP_ELF

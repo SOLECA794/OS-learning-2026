@@ -47,3 +47,45 @@ sdd-governance/
 - 每个结论必须可脱离对话复现：代码 + 日志 + 脚本，而不是"AI 说的"。
 - 区分三类验证：`agent-run`（agent 跑的）、`user-run`（用户跑的）、`not-run`（没跑的）。
 - 静态检查通过 ≠ 运行验证通过，回复中必须明确说明验证强度。
+
+---
+
+## 本项目文件系统维护规则（OS-learning 落地）
+
+### 根目录文件分工
+
+| 文件 | 职责 | 读者 |
+|---|---|---|
+| `README.md` | 仓库总览（外部入口） | 所有人 |
+| `ROADMAP.md` | 当前阶段 + 下一阶段（一页状态） | 外部评审 + 队友 |
+| `CHANGELOG.md` | 汇总变更（按 commit 倒序，一行摘要 + hash） | 外部 |
+| `CONTRIBUTING.md` | 分支/提交/测试命令约定 | 队友 + 外部贡献者 |
+
+### 子目录
+
+| 位置 | 内容 |
+|---|---|
+| `kernel-project/docs/` | 架构文档 00–12（00 vision / 01 arch / 02 mem / … / 10 test / 11 glossary / 12 test-index） |
+| `kernel-project/log/boundary/` | 里程碑边界定义 |
+| `kernel-project/log/change/` | 每次改动记录（按日期命名） |
+| `kernel-project/log/rfc/` | 设计决策 |
+| `kernel-project/log/incident/` | 事故/异常记录（卡死、flaky、build 失败） |
+
+### 更新触发
+
+| 事件 | 更新位置 |
+|---|---|
+| 合并 commit 进 master | `CHANGELOG.md` 顶部加一条 |
+| 完成一个里程碑 | `ROADMAP.md` 已完成打勾 |
+| 改代码/修 bug | `log/change/<日期>-<描述>.md` |
+| 设计决策 | `log/rfc/<topic>/index.md` |
+| 卡死/flaky | `log/incident/<日期>-<简述>.md` |
+| 新缩写 | `docs/11-glossary.md` |
+| 新测试入口 | `docs/12-test-index.md` |
+
+### 原则
+
+- doc 系统面向**外部理解**，不假设读者看过代码；术语统一查 glossary。
+- ROADMAP 已完成项必须能在 git log 找到对应 commit。
+- 详细记录在 `log/change/`，根目录 CHANGELOG 只放摘要。
+- 禁止提交 `artifacts/runs/` 产物到版本库。

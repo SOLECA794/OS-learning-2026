@@ -99,6 +99,9 @@ pub fn main(hartid: usize, dtb_pa: usize) -> ! {
     #[cfg(all(feature = "arch-loongarch64", feature = "la-switch-test"))]
     crate::arch::task::self_test();
     fs::init();
+    // VirtIO-Blk 的固定 MMIO 地址目前只属于 RISC-V QEMU virt 平台。
+    #[cfg(feature = "arch-riscv64")]
+    crate::drivers::init();
     crate::log_info!("M1 paging/trap foundation OK");
     crate::log_info!("M1.5: entering user mode");
     init_user(hartid)
