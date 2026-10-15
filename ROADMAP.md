@@ -1,7 +1,7 @@
 # ROADMAP
 
 > 本文件维护当前阶段与下一阶段目标，一页看清项目状态。
-> 维护规则：每个里程碑完成后更新"已完成"区块；新目标进入"下一阶段"。
+> 周期：一年，终极目标国赛。所有模块按工业级标准做透，不做短期妥协。
 
 ## 当前阶段：G6 完成后稳定期
 
@@ -24,31 +24,41 @@
 | G6 | COW fork（软件 COW，双架构 PTE 无空闲位） | 完成 |
 | 卫生 | warnings 清零、COW 引用计数 debug 防护 | 完成 |
 
-### 下一阶段（按竞赛收益排序）
+### 开发策略
 
-**策略转变**：从"对着 Linux Manual 逐个 RFC"转向"拿 BusyBox sh 当靶子 Spike，缺什么 syscall 临时 stub，跑通后再补校验和测试固化"。
+- 每个模块按工业级自洽标准做透，不留技术债。
+- Spike 仅用于快速定位真实 Linux 程序依赖的 syscall 集合；每个 syscall 仍按 Linux 语义补全校验、errno、边界断言和有界测试。
+- 架构同步关卡：RV 每固化一个核心里程碑，立即同步推 LA64 到同一水平线，不让两端出现代差级分叉。
 
-#### P0 跑真实 Linux 程序的硬前提
+### 下一阶段
 
-- [ ] **brk + 匿名 mmap/munmap**：用户堆扩展。musl/glibc 启动必须通过 brk 或匿名 mmap 初始化 malloc，没有这俩任何真实编译的 Linux 程序都起不来。
-- [ ] **pipe/pipe2 + dup2/dup3**：shell 管道（ls | grep）和测试框架捕获 stdout 的核心依赖。
+#### P0 动态内存与 IPC 基础（工业级 VMA 模型）
 
-#### P1 脱离玩具状态
+- [ ] **brk + mmap/munmap**：VMA 红黑树/B 树管理，区分匿名映射与文件映射，支持 demand paging，munmap 范围拆分。不是 bump 指针。
+- [ ] **pipe/pipe2 + dup2/dup3**：shell 管道与测试框架 stdout 捕获。
 
-- [ ] 真正 cwd（chdir/getcwd，相对路径不再 fallback 到 root）
-- [ ] unlinkat / rename（解除"目录游标稳定依赖无删除"假设）
-- [ ] 信号（POSIX 基本信号，先做 SIGCHLD 即可）
+#### P1 VFS 与存储架构升级
 
-#### P2 集中冲刺（RV 跑通 BusyBox 后）
+- [ ] **VirtIO-Block 驱动 + 块设备抽象层**：结束 include_bytes! 内嵌 ELF。
+- [ ] **Page Cache 与脏页回写**：所有文件操作基于块和缓存，不是同步内存树。
+- [ ] 真正 cwd（chdir/getcwd）、unlinkat/rename。
+- [ ] **信号全链路**：POSIX 信号、sigmask、sigaltstack、sigreturn 现场恢复，不只 kill。
 
-- [ ] LA64 用户态对齐：RV 成熟后一次性 3–5 天集中迁移 Trap/调度/COW，双架构并行验收。
+#### P2 架构同步与多核契约
 
-#### P3 国赛基础设施
+- [ ] **LA64 用户态对齐**：跟随 RV P0/P1 里程碑同步推进，不长期分叉。
+- [ ] **SMP 数据结构预设计**：Per-CPU 调度队列、细粒度自旋锁接口预留；先跑单核负载，接口具备多核并发契约。从核唤醒、IPI 在国赛阶段落地。
 
-- [ ] VirtIO-Block 驱动 + FAT32/简易 ext4：结束 include_bytes! 内嵌 ELF，从 QEMU img 加载程序，支撑 LTP/CAS 测例集。
-- [ ] 网络协议栈：国赛阶段完整规划，先预留接口。
+#### P3 阶段标尺（每阶段验收标志）
+
+| 阶段 | 验收标准 |
+|---|---|
+| A | 原生跑通完整静态编译 BusyBox 套件（shell 脚本 + 管道交互） |
+| B | Lua / QuickJS / Pthread 基础测例运行 |
+| C | LTP 核心子集高通过率 |
+| 终极 | 内核内自举编译 GCC/Make |
 
 ### 边界
 
-- 当前单核（从核 park）；SMP 多核调度在国赛阶段规划，就绪队列锁与关中断时机提前审计。
-- 测试入口均为有界 QEMU 运行。
+- 当前单核（从核 park）；SMP 数据结构预留，不实际唤醒从核。
+- 测试入口均为有界 QEMU 运行，每攻克一个复杂特性保留量化回归证据。
