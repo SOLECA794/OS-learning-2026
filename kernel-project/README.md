@@ -88,8 +88,9 @@ kernel-project/
 RISC-V M2.8 的 COW/回收固定范围已完成：父子和内核写入隔离、`wait4` 失败重试、
 物理帧分配故障注入、128 轮重复回收均通过 QEMU 验收。
 LoongArch 已在 QEMU 完成 M1.5 用户态、M2 同步 `fork/exit/wait4`、父子 COW 栈隔离与 `execve`；
-M2.5 用户态 `openat/read/close` 文件读取，以及普通文件 `write/lseek/pread64/pwrite64/dup`
-共享游标已通过定向测试。时钟抢占及完整 FD/文件 ABI 仍未对齐 RISC-V。
+M2.5 用户态 `openat/read/close` 文件读取、普通文件 `write/lseek/pread64/pwrite64/dup`
+共享游标，以及 `mkdirat/getdents64/fstat/dup2` 已通过定向测试。`pipe`、时钟抢占及
+完整 FD/文件 ABI 仍未对齐 RISC-V。
 
 | 能力 | 状态 | 验证证据 |
 |---|---|---|

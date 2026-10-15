@@ -50,6 +50,8 @@ la-exec-test = []
 la-file-test = []
 # LoongArch 文件写入、定位读写和 dup 用户态验收模式。
 la-fd-ops-test = []
+# LoongArch 目录、元数据和 dup2 原生用户态验收模式。
+la-dir-test = []
 
 [profile.dev]
 panic = "abort"

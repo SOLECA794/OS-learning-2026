@@ -62,18 +62,14 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
         SYSCALL_LSEEK => fd::sys_lseek(args[0], args[1] as i64, args[2]),
         SYSCALL_PREAD64 => fd::sys_pread64(args[0], args[1], args[2], args[3] as i64),
         SYSCALL_PWRITE64 => fd::sys_pwrite64(args[0], args[1], args[2], args[3] as i64),
-        #[cfg(feature = "arch-riscv64")]
         SYSCALL_FSTAT => fd::sys_fstat(args[0], args[1]),
         SYSCALL_CLOSE => fd::sys_close(args[0]),
         SYSCALL_OPENAT => fd::sys_openat(args[0], args[1], args[2], args[3]),
-        #[cfg(feature = "arch-riscv64")]
         SYSCALL_MKDIRAT => fd::sys_mkdirat(args[0], args[1], args[2]),
         SYSCALL_DUP => fd::sys_dup(args[0]),
-        #[cfg(feature = "arch-riscv64")]
         SYSCALL_DUP2 => fd::sys_dup2(args[0], args[1]),
         #[cfg(feature = "arch-riscv64")]
         SYSCALL_PIPE => fd::sys_pipe(args[0]),
-        #[cfg(feature = "arch-riscv64")]
         SYSCALL_GETDENTS64 => fd::sys_getdents64(args[0], args[1], args[2]),
         // 两个架构都由共享 task owner 处理进程生命周期。
         SYSCALL_EXIT => crate::kernel::task::exit_current(args[0] as i32),
