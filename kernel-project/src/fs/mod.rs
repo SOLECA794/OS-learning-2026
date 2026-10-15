@@ -8,9 +8,11 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 
 mod file;
+mod pipe;
 mod programs;
 mod ramfs;
 pub(crate) use file::OpenFileDesc;
+pub(crate) use pipe::Pipe;
 use ramfs::Inode;
 
 /// 与用户 ABI 数值无关的节点类型。

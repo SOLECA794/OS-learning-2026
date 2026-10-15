@@ -3,7 +3,7 @@
 //! fork 复制槽位而共享描述；close/exit 释放引用，最后一个引用释放描述。
 //! 控制台仍为明确的 FD 类型，VFS 不依赖任务调度和 UART 等待协议。
 
-use crate::fs::OpenFileDesc;
+use crate::fs::{OpenFileDesc, Pipe};
 use alloc::sync::Arc;
 use alloc::vec;
 use alloc::vec::Vec;
@@ -17,6 +17,10 @@ pub enum FdEntry {
     ConsoleOutput,
     /// 打开文件：Arc 共享 → dup/fork 继承同一偏移。
     File(Arc<OpenFileDesc>),
+    /// 管道读端：从环形缓冲区读。
+    PipeRead(Arc<Pipe>),
+    /// 管道写端：写入环形缓冲区。
+    PipeWrite(Arc<Pipe>),
 }
 
 /// 进程 FD 表：fd = Vec 索引；None = 空槽（可复用）。
@@ -61,6 +65,16 @@ impl FdTable {
             return Err(EBADF);
         }
         *slot = None;
+        Ok(())
+    }
+
+    /// dup2：把 entry 放到指定 fd 位置；若该位置已有 fd 先 close。
+    pub fn set(&mut self, fd: usize, entry: FdEntry) -> Result<(), isize> {
+        // 扩展表到 fd+1 长。
+        while self.entries.len() <= fd {
+            self.entries.push(None);
+        }
+        self.entries[fd] = Some(entry);
         Ok(())
     }
 }

@@ -13,6 +13,8 @@ pub const SYSCALL_FORK: usize = 220;
 pub const SYSCALL_WAIT4: usize = 260;
 pub const SYSCALL_EXECVE: usize = 221;
 pub const SYSCALL_DUP: usize = 23;
+pub const SYSCALL_DUP2: usize = 24;
+pub const SYSCALL_PIPE: usize = 59;
 pub const SYSCALL_MKDIRAT: usize = 34;
 pub const SYSCALL_OPENAT: usize = 56;
 pub const SYSCALL_CLOSE: usize = 57;
@@ -71,6 +73,10 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
         SYSCALL_MKDIRAT => fd::sys_mkdirat(args[0], args[1], args[2]),
         #[cfg(feature = "arch-riscv64")]
         SYSCALL_DUP => fd::sys_dup(args[0]),
+        #[cfg(feature = "arch-riscv64")]
+        SYSCALL_DUP2 => fd::sys_dup2(args[0], args[1]),
+        #[cfg(feature = "arch-riscv64")]
+        SYSCALL_PIPE => fd::sys_pipe(args[0]),
         #[cfg(feature = "arch-riscv64")]
         SYSCALL_GETDENTS64 => fd::sys_getdents64(args[0], args[1], args[2]),
         // exit/fork/wait4 依赖 task 模块（RV 用户态调度）；LA 用户态未实现，回落 ENOSYS。

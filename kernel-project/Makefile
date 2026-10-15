@@ -87,6 +87,7 @@ USER_CONSOLE_ELF := build/user/uapp-console.elf
 USER_VFS_ELF := build/user/uapp-vfs.elf
 USER_VFS_EXEC_ELF := build/user/vfs-exec.elf
 USER_BRK_ELF := build/user/uapp-brk.elf
+USER_PIPE_ELF := build/user/uapp-pipe.elf
 # user crate 的 .cargo/config.toml 不会被 --manifest-path 模式发现（cargo 从 CWD 找配置），
 # 因此 target 与链接脚本在此显式声明。
 # -T 必须用 $(CURDIR) 绝对路径：rustc 链接时工作目录会切到临时目录，相对路径找不到脚本。
@@ -105,6 +106,7 @@ user:
 	@cp user/target/riscv64gc-unknown-none-elf/release/uapp-vfs $(USER_VFS_ELF)
 	@cp user/target/riscv64gc-unknown-none-elf/release/vfs-exec $(USER_VFS_EXEC_ELF)
 	@cp user/target/riscv64gc-unknown-none-elf/release/uapp-brk $(USER_BRK_ELF)
+	@cp user/target/riscv64gc-unknown-none-elf/release/uapp-pipe $(USER_PIPE_ELF)
 	@echo "用户程序：$(USER_ELF) $(USER_ELF2) $(USER_SHELL_ELF)"
 
 ## W2 附加用例：fault 模式用户程序（make test-fault 专用）--------------------------
@@ -187,6 +189,17 @@ build-brk: user
 
 test-brk: build-brk
 	$(PYTHON) tools/run_qemu.py --qemu $(QEMU_BIN) --flags "$(QEMU_FLAGS)" --arch riscv64 --mode boot --timeout 60 --pattern "BRK-PASS" --run-id brk-$(RUN_ID) --elf $(KERNEL_ELF)
+
+# P0 pipe 验收：task0 = uapp-pipe.elf，验证 pipe/dup2 管道读写。
+build-pipe: user
+	@mkdir -p $(BUILD_DIR)
+	$(CARGO) build --target $(RUST_TARGET) --features $(RUST_FEATURES),uapp-pipe $(CARGO_PROFILE_FLAG)
+	@cp $(CARGO_OUT_DIR)/$(KERNEL_NAME) $(KERNEL_ELF)
+	@$(PYTHON) tools/check-image.py $(KERNEL_ELF) $(LINK_BASE) $(ARCH)
+	@echo "产物：$(KERNEL_ELF)（uapp-pipe 模式）"
+
+test-pipe: build-pipe
+	$(PYTHON) tools/run_qemu.py --qemu $(QEMU_BIN) --flags "$(QEMU_FLAGS)" --arch riscv64 --mode boot --timeout 60 --pattern "PIPE-PASS" --run-id pipe-$(RUN_ID) --elf $(KERNEL_ELF)
 
 # M2.5 控制台输入验收：内核确认读任务阻塞后注入固定串口字节。
 build-console: user

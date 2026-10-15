@@ -368,16 +368,29 @@ pub(crate) fn boot_tasks(hartid: usize) -> ! {
         not(feature = "uapp-fault-test"),
         not(feature = "uapp-cow"),
         not(feature = "uapp-vfs"),
-        not(feature = "uapp-console")
+        not(feature = "uapp-console"),
+        not(feature = "uapp-pipe")
     ))]
     const UAPP_ELF: &[u8] = include_bytes!("../../../build/user/uapp-brk.elf");
+    // P0 pipe 验收模式（make test-pipe）：task0 = uapp-pipe.elf。
     #[cfg(all(
+        feature = "uapp-pipe",
         not(feature = "uapp-shell"),
         not(feature = "uapp-fault-test"),
         not(feature = "uapp-cow"),
         not(feature = "uapp-vfs"),
         not(feature = "uapp-console"),
         not(feature = "uapp-brk")
+    ))]
+    const UAPP_ELF: &[u8] = include_bytes!("../../../build/user/uapp-pipe.elf");
+    #[cfg(all(
+        not(feature = "uapp-shell"),
+        not(feature = "uapp-fault-test"),
+        not(feature = "uapp-cow"),
+        not(feature = "uapp-vfs"),
+        not(feature = "uapp-console"),
+        not(feature = "uapp-brk"),
+        not(feature = "uapp-pipe")
     ))]
     const UAPP_ELF: &[u8] = include_bytes!("../../../build/user/uapp.elf");
     let uapp: &[u8] = UAPP_ELF;
