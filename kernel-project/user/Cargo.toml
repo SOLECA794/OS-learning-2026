@@ -35,3 +35,6 @@ path = "src/bin/uapp-brk.rs"
 [[bin]]
 name = "uapp-pipe"
 path = "src/bin/uapp-pipe.rs"
+[[bin]]
+name = "uapp-mmap"
+path = "src/bin/uapp-mmap.rs"

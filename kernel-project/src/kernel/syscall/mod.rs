@@ -25,6 +25,8 @@ pub const SYSCALL_PWRITE64: usize = 68;
 pub const SYSCALL_FSTAT: usize = 80;
 pub const SYSCALL_GETDENTS64: usize = 217;
 pub const SYSCALL_BRK: usize = 214;
+pub const SYSCALL_MUNMAP: usize = 215;
+pub const SYSCALL_MMAP: usize = 222;
 
 #[cfg(feature = "arch-riscv64")]
 mod exec;
@@ -41,6 +43,7 @@ const ENOSYS: isize = 38;
 const EFAULT: isize = -14;
 const ECHILD: isize = -10;
 const ENOMEM: isize = -12;
+const EINVAL: isize = -22;
 /// wait4 options：WNOHANG（非阻塞）。
 const WNOHANG: usize = 1;
 
@@ -96,6 +99,18 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
         SYSCALL_BRK => match crate::kernel::task::with_current_space(|space| space.brk(args[0])) {
             Some(Ok(addr)) => addr as isize,
             _ => -ENOMEM,
+        },
+        // mmap(addr, len, prot, flags, fd, offset)：当前只支持匿名 RW 映射。
+        #[cfg(feature = "arch-riscv64")]
+        SYSCALL_MMAP => match crate::kernel::task::with_current_space(|space| space.mmap_anon(args[1])) {
+            Some(Ok(addr)) => addr as isize,
+            _ => -ENOMEM,
+        },
+        // munmap(addr, len)：按起始地址解除映射。
+        #[cfg(feature = "arch-riscv64")]
+        SYSCALL_MUNMAP => match crate::kernel::task::with_current_space(|space| space.munmap(args[0], args[1])) {
+            Some(Ok(())) => 0,
+            _ => -EINVAL,
         },
         _ => -ENOSYS,
     }

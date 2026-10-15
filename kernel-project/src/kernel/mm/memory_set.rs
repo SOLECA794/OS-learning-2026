@@ -181,6 +181,8 @@ pub struct MemorySet {
     heap_base: VirtAddr,
     /// 当前堆结束地址（program break）；初始等于 heap_base。
     heap_brk: VirtAddr,
+    /// mmap 匿名映射当前顶部（页对齐）；从 mmap_base 向上 bump 增长。
+    mmap_top: VirtAddr,
 }
 
 impl MemorySet {
@@ -192,6 +194,7 @@ impl MemorySet {
             cow_pages: BTreeSet::new(),
             heap_base: VirtAddr::new(0),
             heap_brk: VirtAddr::new(0),
+            mmap_top: VirtAddr::new(0),
         })
     }
 
@@ -231,6 +234,8 @@ impl MemorySet {
         // 避开 0x1000_0000（QEMU UART0 MMIO）和 PLIC（0x0c00_0000）。
         memory_set.heap_base = VirtAddr::new(0x2000_0000);
         memory_set.heap_brk = memory_set.heap_base;
+        // mmap 匿名映射：从 0x4000_0000 向上 bump 增长，栈顶 0x7f00_0000 之下。
+        memory_set.mmap_top = VirtAddr::new(0x4000_0000);
         Ok(memory_set)
     }
 
@@ -496,6 +501,24 @@ impl MemorySet {
         }
         self.heap_brk = target;
         Ok(self.heap_brk.value())
+    }
+
+    /// mmap 匿名映射：从 mmap_top 向上分配 len 字节（页对齐），RW 用户页。
+    /// 返回映射起始地址。
+    pub(crate) fn mmap_anon(&mut self, len: usize) -> Result<usize, MemoryError> {
+        let len = VirtAddr::new(len).ceil()?.value();
+        let start = self.mmap_top;
+        let end = VirtAddr::new(start.value() + len);
+        let range = AddressRange::new(start, end)?;
+        let area = MapArea::new(range, MapType::Framed, MapPermission::READ | MapPermission::WRITE | MapPermission::USER)?;
+        self.insert(area)?;
+        self.mmap_top = end;
+        Ok(start.value())
+    }
+
+    /// munmap：按起始地址删除映射并释放物理页。
+    pub(crate) fn munmap(&mut self, addr: usize, len: usize) -> Result<(), MemoryError> {
+        self.remove(VirtAddr::new(addr))
     }
 
     /// 把已映射的用户可读页复制到内核拥有的缓冲区，不向外暴露用户页借用。

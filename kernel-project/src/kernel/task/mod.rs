@@ -369,7 +369,8 @@ pub(crate) fn boot_tasks(hartid: usize) -> ! {
         not(feature = "uapp-cow"),
         not(feature = "uapp-vfs"),
         not(feature = "uapp-console"),
-        not(feature = "uapp-pipe")
+        not(feature = "uapp-pipe"),
+        not(feature = "uapp-mmap")
     ))]
     const UAPP_ELF: &[u8] = include_bytes!("../../../build/user/uapp-brk.elf");
     // P0 pipe 验收模式（make test-pipe）：task0 = uapp-pipe.elf。
@@ -380,10 +381,13 @@ pub(crate) fn boot_tasks(hartid: usize) -> ! {
         not(feature = "uapp-cow"),
         not(feature = "uapp-vfs"),
         not(feature = "uapp-console"),
-        not(feature = "uapp-brk")
+        not(feature = "uapp-brk"),
+        not(feature = "uapp-mmap")
     ))]
     const UAPP_ELF: &[u8] = include_bytes!("../../../build/user/uapp-pipe.elf");
+    // P0 mmap 验收模式（make test-mmap）：task0 = uapp-mmap.elf。
     #[cfg(all(
+        feature = "uapp-mmap",
         not(feature = "uapp-shell"),
         not(feature = "uapp-fault-test"),
         not(feature = "uapp-cow"),
@@ -391,6 +395,17 @@ pub(crate) fn boot_tasks(hartid: usize) -> ! {
         not(feature = "uapp-console"),
         not(feature = "uapp-brk"),
         not(feature = "uapp-pipe")
+    ))]
+    const UAPP_ELF: &[u8] = include_bytes!("../../../build/user/uapp-mmap.elf");
+    #[cfg(all(
+        not(feature = "uapp-shell"),
+        not(feature = "uapp-fault-test"),
+        not(feature = "uapp-cow"),
+        not(feature = "uapp-vfs"),
+        not(feature = "uapp-console"),
+        not(feature = "uapp-brk"),
+        not(feature = "uapp-pipe"),
+        not(feature = "uapp-mmap")
     ))]
     const UAPP_ELF: &[u8] = include_bytes!("../../../build/user/uapp.elf");
     let uapp: &[u8] = UAPP_ELF;
