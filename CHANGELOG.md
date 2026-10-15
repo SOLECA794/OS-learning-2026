@@ -6,6 +6,7 @@
 
 ## [Unreleased]
 
+- docs: ROADMAP 重排优先级——P0 补 brk/mmap + pipe/dup2（跑真实 Linux 程序前提），LA64 从第一优先级降到 P2 集中冲刺；策略转向 Spike（BusyBox 靶子先行）
 - style: 清理 11 个 dead_code warnings + COW 引用计数 debug 防护（commit 0095e30）
   - address.rs / memory_set.rs / task / arch trap / kernel_stack / syscall 标 allow(dead_code) 并注释保留原因
   - 删除重复定义的 EBADF
