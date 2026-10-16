@@ -20,6 +20,14 @@ const GED_POWER_OFF_VALUE: u8 = (5 << 2) | (1 << 5);
 /// QEMU ACPI GED 定义的复位确认值。
 const GED_RESET_VALUE: u8 = 0x42;
 
+/// QEMU virt LS7A PCH PIC 的 MMIO 基址及 UART0 输入脚号。
+pub const PCH_PIC_BASE: usize = 0x1000_0000;
+pub const UART_PCH_IRQ: usize = 2;
+/// EXTIOI IOCSR 寄存器基址；UART0 映射到外部中断号 2。
+pub const EXTIOI_IPMAP_BASE: usize = 0x14c0;
+pub const EXTIOI_ENABLE_BASE: usize = 0x1600;
+pub const EXTIOI_ISR_BASE: usize = 0x1800;
+
 #[inline]
 unsafe fn write_ged(address: usize, value: u8) {
     // SAFETY: 调用方只传入 QEMU virt 已定义的 GED 字节寄存器地址；volatile 防止编译器

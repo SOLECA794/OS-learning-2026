@@ -38,7 +38,7 @@ $(error 编排错误：配置/清理目标不能与构建目标同条命令。�
 endif
 endif
 
-DEFAULT_PHONY := all defconfig alldefconfig menuconfig check build run gdb test test-user test-la-switch build-la-switch test-la-process build-la-process test-la-exec build-la-exec test-la-file build-la-file test-la-fd-ops build-la-fd-ops test-la-dir build-la-dir fmt fmt-check clean user user-la user-fault build-fault test-fault run-shell build-shell test-shell build-console test-console build-vfs test-vfs test-process build-cow-oom test-cow-oom build-brk test-brk build-pipe test-pipe build-mmap test-mmap
+DEFAULT_PHONY := all defconfig alldefconfig menuconfig check build run gdb test test-user test-la-switch build-la-switch test-la-process build-la-process test-la-exec build-la-exec test-la-file build-la-file test-la-fd-ops build-la-fd-ops test-la-dir build-la-dir test-la-pipe build-la-pipe test-la-preempt build-la-preempt test-la-memory build-la-memory build-la-cow-oom test-la-cow-oom build-la-console test-la-console fmt fmt-check clean user user-la user-fault build-fault test-fault run-shell build-shell test-shell build-console test-console build-vfs test-vfs test-process build-cow-oom test-cow-oom build-brk test-brk build-pipe test-pipe build-mmap test-mmap
 .PHONY: $(DEFAULT_PHONY)
 
 all:
@@ -140,13 +140,77 @@ test-la-dir: build-la-dir
 		--mode boot --timeout 60 --pattern "LA_USER_EXIT_PASS code=0" --run-id la-dir-$(RUN_ID) --elf $(KERNEL_ELF)
 	$(PYTHON) tools/check_la_dir.py artifacts/runs/la-dir-$(RUN_ID)/serial.log
 
+# LoongArch FD 第四批：pipe、dup2 重定向及无效用户指针回滚。
+build-la-pipe: user user-la
+	@mkdir -p $(BUILD_DIR)
+	$(CARGO) build --target $(RUST_TARGET) --features $(RUST_FEATURES),la-pipe-test $(CARGO_PROFILE_FLAG)
+	@cp $(CARGO_OUT_DIR)/$(KERNEL_NAME) $(KERNEL_ELF)
+	@$(PYTHON) tools/check-image.py $(KERNEL_ELF) $(LINK_BASE) $(ARCH)
+
+test-la-pipe: build-la-pipe
+	$(PYTHON) tools/run_qemu.py --qemu $(QEMU_BIN) --flags "$(QEMU_FLAGS)" --arch $(ARCH) \
+		--mode boot --timeout 60 --pattern "LA_USER_EXIT_PASS code=0" --run-id la-pipe-$(RUN_ID) --elf $(KERNEL_ELF)
+	$(PYTHON) tools/check_la_pipe.py artifacts/runs/la-pipe-$(RUN_ID)/serial.log
+
+# LoongArch 周期时钟抢占：父用户进程不让出 CPU，子进程仍必须运行。
+build-la-preempt: user user-la
+	@mkdir -p $(BUILD_DIR)
+	$(CARGO) build --target $(RUST_TARGET) --features $(RUST_FEATURES),la-preempt-test $(CARGO_PROFILE_FLAG)
+	@cp $(CARGO_OUT_DIR)/$(KERNEL_NAME) $(KERNEL_ELF)
+	@$(PYTHON) tools/check-image.py $(KERNEL_ELF) $(LINK_BASE) $(ARCH)
+
+test-la-preempt: build-la-preempt
+	$(PYTHON) tools/run_qemu.py --qemu $(QEMU_BIN) --flags "$(QEMU_FLAGS)" --arch $(ARCH) \
+		--mode boot --timeout 60 --pattern "LA_USER_EXIT_PASS code=0" --run-id la-preempt-$(RUN_ID) --elf $(KERNEL_ELF)
+	$(PYTHON) tools/check_la_preempt.py artifacts/runs/la-preempt-$(RUN_ID)/serial.log
+
+# LoongArch 基础堆与匿名页 syscall 验收。
+build-la-memory: user user-la
+	@mkdir -p $(BUILD_DIR)
+	$(CARGO) build --target $(RUST_TARGET) --features $(RUST_FEATURES),la-memory-test $(CARGO_PROFILE_FLAG)
+	@cp $(CARGO_OUT_DIR)/$(KERNEL_NAME) $(KERNEL_ELF)
+	@$(PYTHON) tools/check-image.py $(KERNEL_ELF) $(LINK_BASE) $(ARCH)
+
+test-la-memory: build-la-memory
+	$(PYTHON) tools/run_qemu.py --qemu $(QEMU_BIN) --flags "$(QEMU_FLAGS)" --arch $(ARCH) \
+		--mode boot --timeout $(LA_MEMORY_TIMEOUT) --pattern "LA_USER_EXIT_PASS code=0" --run-id la-memory-$(RUN_ID) --elf $(KERNEL_ELF)
+	$(PYTHON) tools/check_la_memory.py artifacts/runs/la-memory-$(RUN_ID)/serial.log
+
+# 诊断内存 syscall 用例时可缩短上限；常规回归保持 60 秒。
+LA_MEMORY_TIMEOUT ?= 60
+
+# LoongArch M2.8：复用公共 COW fork 全分配点故障注入，并运行父子 COW 用户验收。
+build-la-cow-oom: user user-la
+	@mkdir -p $(BUILD_DIR)
+	$(CARGO) build --target $(RUST_TARGET) --features $(RUST_FEATURES),la-process-test,la-cow-oom-test,m28-frame-fault-test $(CARGO_PROFILE_FLAG)
+	@cp $(CARGO_OUT_DIR)/$(KERNEL_NAME) $(KERNEL_ELF)
+	@$(PYTHON) tools/check-image.py $(KERNEL_ELF) $(LINK_BASE) $(ARCH)
+
+test-la-cow-oom: build-la-cow-oom
+	$(PYTHON) tools/run_qemu.py --qemu $(QEMU_BIN) --flags "$(QEMU_FLAGS)" --arch $(ARCH) \
+		--mode boot --timeout 60 --pattern "LA_USER_EXIT_PASS code=0" --run-id la-cow-oom-$(RUN_ID) --elf $(KERNEL_ELF)
+	$(PYTHON) tools/check_la_cow_oom.py artifacts/runs/la-cow-oom-$(RUN_ID)/serial.log
+
+# LoongArch QEMU virt UART RX：等待队列进入 idle 后注入固定串口输入并核验唤醒。
+build-la-console: user user-la
+	@mkdir -p $(BUILD_DIR)
+	$(CARGO) build --target $(RUST_TARGET) --features $(RUST_FEATURES),la-console-test $(CARGO_PROFILE_FLAG)
+	@cp $(CARGO_OUT_DIR)/$(KERNEL_NAME) $(KERNEL_ELF)
+	@$(PYTHON) tools/check-image.py $(KERNEL_ELF) $(LINK_BASE) $(ARCH)
+
+test-la-console: build-la-console
+	$(PYTHON) tools/run_qemu.py --qemu $(QEMU_BIN) --flags "$(QEMU_FLAGS)" --arch $(ARCH) \
+		--mode boot --timeout $(CONSOLE_TIMEOUT) --pattern "LA_USER_EXIT_PASS code=0" --run-id la-console-$(RUN_ID) \
+		--stdin-file $(CONSOLE_FIXTURE) --stdin-after "\\[sched\\] idle waiting for console input" --elf $(KERNEL_ELF)
+	$(PYTHON) tools/check_la_console.py artifacts/runs/la-console-$(RUN_ID)/serial.log
+
 # 诊断失败时允许缩短等待；正式验收仍使用 60 秒上限。
 LA_EXEC_TIMEOUT ?= 60
 
 # 诊断时可缩短有界运行时间；正式验收默认仍给父子任务 60 秒。
 LA_PROCESS_TIMEOUT ?= 60
 else
-build-la-switch test-la-switch build-la-process test-la-process build-la-exec test-la-exec build-la-file test-la-file build-la-fd-ops test-la-fd-ops build-la-dir test-la-dir:
+build-la-switch test-la-switch build-la-process test-la-process build-la-exec test-la-exec build-la-file test-la-file build-la-fd-ops test-la-fd-ops build-la-dir test-la-dir build-la-pipe test-la-pipe build-la-preempt test-la-preempt build-la-memory test-la-memory build-la-cow-oom test-la-cow-oom build-la-console test-la-console:
 	@echo "LoongArch 专用测试只适用于 ARCH=loongarch64"; exit 1
 endif
 
@@ -205,6 +269,11 @@ LA_EXEC_TARGET_ELF := build/user/la-exec-target.elf
 LA_FILE_ELF := build/user/la-file.elf
 LA_FD_OPS_ELF := build/user/la-fd-ops.elf
 LA_DIR_ELF := build/user/la-dir.elf
+LA_PIPE_ELF := build/user/la-pipe.elf
+LA_PREEMPT_ELF := build/user/la-preempt.elf
+LA_MEMORY_ELF := build/user/la-memory.elf
+LA_COW_STRESS_ELF := build/user/la-cow-stress.elf
+LA_CONSOLE_ELF := build/user/la-console.elf
 LA_USER_RUSTFLAGS := -C link-arg=-T$(CURDIR)/user/loongarch64/user.ld -C target-feature=-lsx,-lasx
 
 user-la:
@@ -217,6 +286,11 @@ user-la:
 	@cp user/loongarch64/target/loongarch64-unknown-none/release/la-file $(LA_FILE_ELF)
 	@cp user/loongarch64/target/loongarch64-unknown-none/release/la-fd-ops $(LA_FD_OPS_ELF)
 	@cp user/loongarch64/target/loongarch64-unknown-none/release/la-dir $(LA_DIR_ELF)
+	@cp user/loongarch64/target/loongarch64-unknown-none/release/la-pipe $(LA_PIPE_ELF)
+	@cp user/loongarch64/target/loongarch64-unknown-none/release/la-preempt $(LA_PREEMPT_ELF)
+	@cp user/loongarch64/target/loongarch64-unknown-none/release/la-memory $(LA_MEMORY_ELF)
+	@cp user/loongarch64/target/loongarch64-unknown-none/release/la-cow-stress $(LA_COW_STRESS_ELF)
+	@cp user/loongarch64/target/loongarch64-unknown-none/release/la-console $(LA_CONSOLE_ELF)
 
 ## W2 附加用例：fault 模式用户程序（make test-fault 专用）--------------------------
 

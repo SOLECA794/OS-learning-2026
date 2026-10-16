@@ -3,6 +3,8 @@
 //! 地址 0x1FE0_01E0，寄存器宽度 8 位、步长 1 字节（不是常见的 32 位步长）。
 //! M0 阶段 boot 运行在 DA=1 物理直址下，MMIO 直接按物理地址访问，无需映射。
 
+use crate::klib::sync::SpinLock;
+
 const UART_BASE: usize = 0x1FE0_01E0;
 
 /// 寄存器偏移（字节）；DLAB=1 时 0/1 号寄存器改作波特率除数。
@@ -16,9 +18,50 @@ const LCR_8N1: u8 = 0x03;
 const LCR_DLAB: u8 = 0x80;
 const LSR_THRE: u8 = 0x20;
 const LSR_DATA_READY: u8 = 0x01;
+/// IRQ 中固定容量的 UART 接收环形队列；满时丢新字节，不在中断中分配。
+const RX_CAPACITY: usize = 256;
 
-/// 当前 LoongArch 未接入 RX 中断；无输入时不能让任务阻塞等待。
-pub const INPUT_WAKEUP_SUPPORTED: bool = false;
+/// QEMU virt UART RX IRQ 能唤醒等待 stdin 的任务。
+pub const INPUT_WAKEUP_SUPPORTED: bool = true;
+
+struct RxQueue {
+    bytes: [u8; RX_CAPACITY],
+    head: usize,
+    len: usize,
+    dropped: usize,
+}
+
+impl RxQueue {
+    const fn new() -> Self {
+        Self {
+            bytes: [0; RX_CAPACITY],
+            head: 0,
+            len: 0,
+            dropped: 0,
+        }
+    }
+
+    fn push(&mut self, byte: u8) {
+        if self.len == RX_CAPACITY {
+            self.dropped = self.dropped.saturating_add(1);
+            return;
+        }
+        self.bytes[(self.head + self.len) % RX_CAPACITY] = byte;
+        self.len += 1;
+    }
+
+    fn pop(&mut self) -> Option<u8> {
+        if self.len == 0 {
+            return None;
+        }
+        let byte = self.bytes[self.head];
+        self.head = (self.head + 1) % RX_CAPACITY;
+        self.len -= 1;
+        Some(byte)
+    }
+}
+
+static RX: SpinLock<RxQueue> = SpinLock::new(RxQueue::new());
 
 #[inline]
 unsafe fn write_reg(offset: usize, value: u8) {
@@ -46,6 +89,30 @@ pub fn init() {
     }
 }
 
+/// 打开 UART RX 中断；先把已有 FIFO 字节移入软件队列，避免初始化时丢输入。
+pub fn init_rx() {
+    drain_rx();
+    // SAFETY: UART 寄存器由当前 QEMU virt 平台独占；只使能接收数据可用中断。
+    unsafe { write_reg(IER, 0x01) };
+}
+
+/// UART IRQ 中断处理：将硬件 FIFO 排空至固定软件队列。
+pub fn handle_rx_irq() {
+    drain_rx();
+}
+
+fn drain_rx() {
+    let mut queue = RX.lock();
+    loop {
+        // SAFETY: 调用发生在内核初始化或 UART RX handler，寄存器映射由平台保证。
+        if unsafe { read_reg(LSR) } & LSR_DATA_READY == 0 {
+            break;
+        }
+        // SAFETY: LSR 已报告至少一个字节可读，读取 RBR 消费 FIFO 首字节。
+        queue.push(unsafe { read_reg(THR) });
+    }
+}
+
 fn putchar(ch: u8) {
     // SAFETY: 同上，MMIO 轮询，无重入（M0 只有 bootstrap hart 在用）。
     unsafe {
@@ -56,22 +123,21 @@ fn putchar(ch: u8) {
 
 /// 轮询读取当前已到达的串口字节，不等待后续输入。
 pub fn read_available(dst: &mut [u8]) -> usize {
-    let mut read = 0;
-    while read < dst.len() {
-        // SAFETY: UART 寄存器页已由 LoongArch 内核地址空间映射。
-        if unsafe { read_reg(LSR) } & LSR_DATA_READY == 0 {
-            break;
+    let mut queue = RX.lock();
+    let mut count = 0;
+    while count < dst.len() {
+        match queue.pop() {
+            Some(byte) => dst[count] = byte,
+            None => break,
         }
-        dst[read] = unsafe { read_reg(THR) };
-        read += 1;
+        count += 1;
     }
-    read
+    count
 }
 
 /// 与 RISC-V 控制台抽象保持同形；这里只探测硬件当前是否有字节。
 pub fn has_input() -> bool {
-    // SAFETY: 同 read_available；只读串口线路状态寄存器。
-    unsafe { read_reg(LSR) & LSR_DATA_READY != 0 }
+    RX.lock().len != 0
 }
 
 /// klib::log 的字节输出钩子。

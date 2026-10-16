@@ -1,8 +1,7 @@
 //! 架构无关的 trap 处理入口。
 //!
 //! 架构层负责保存寄存器并把硬件原因归一化为 `TrapCause`；本模块拥有处理策略。
-//! 当前两个架构都能接管用户态系统调用；LoongArch 只有单任务 owner，尚未
-//! 接入时钟调度。未实现的 trap 会打印现场后安全停机。
+//! 当前两个架构都能接管用户态系统调用和时钟中断；未实现的 trap 会打印现场后安全停机。
 
 /// 两个架构向内核提交的统一 trap 原因。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -58,6 +57,30 @@ fn handle_trap(context: &mut crate::arch::TrapContext) {
                 crate::kernel::task::wake_console_readers();
             }
         }
+        #[cfg(feature = "arch-loongarch64")]
+        TrapCause::Interrupt { code } => {
+            let timer_bit = crate::arch::timer::TIMER_INTERRUPT_BIT;
+            let external_bit = crate::arch::interrupt::EXTERNAL_INTERRUPT_BIT;
+            if code & external_bit != 0 {
+                if !crate::arch::interrupt::handle_external() {
+                    fatal_trap(context, cause, "unknown LoongArch external interrupt")
+                }
+                if crate::arch::console::has_input() {
+                    crate::kernel::task::wake_console_readers();
+                }
+            }
+            if code & timer_bit != 0 {
+                // 清除本核定时器电平中断；只在用户来源执行异步任务切换。
+                crate::arch::timer::clear_interrupt();
+                if context.is_from_user() {
+                    crate::kernel::task::schedule();
+                }
+            }
+            if code & !(timer_bit | external_bit) != 0 {
+                fatal_trap(context, cause, "unhandled LoongArch interrupt bit")
+            }
+        }
+        #[cfg(feature = "arch-riscv64")]
         TrapCause::Interrupt { .. } => fatal_trap(context, cause, "unhandled interrupt"),
         TrapCause::Breakpoint => {
             fatal_trap(context, cause, "breakpoint handling is not implemented")

@@ -5,27 +5,61 @@
 
 use core::arch::global_asm;
 
-/// 临时用户栈布局：原 0x7f00_0000 在 QEMU 首次写栈时触发 PIS(2)，
-/// 0x1001_0000 的定向 fork/COW 测试通过，且避开内核低 256 MiB 身份映射。
-/// 行为边界：仅证明该低虚拟地址布局；修复高地址页表遍历后再恢复统一栈顶。
-pub const INITIAL_USER_STACK_TOP: usize = 0x1001_0000;
+/// 用户栈顶与 RISC-V 对齐；LoongArch TLB refill 须完整遍历三级页表。
+pub const INITIAL_USER_STACK_TOP: usize = 0x7f00_0000;
 /// 首任务先沿用一页用户栈，按硬件页表路径独立验收。
 pub const INITIAL_USER_STACK_BYTES: usize = 0x1000;
 
 /// 当前 LoongArch 构建的首个用户 ELF；与 RISC-V ecall 程序互不混用。
 pub fn initial_user_image() -> &'static [u8] {
     // 进程验收模式使用独立 ELF，默认仍运行 M1.5 用户程序。
-    #[cfg(feature = "la-dir-test")]
+    #[cfg(feature = "la-console-test")]
+    const UAPP_ELF: &[u8] = include_bytes!("../../../build/user/la-console.elf");
+    #[cfg(feature = "la-memory-test")]
+    const UAPP_ELF: &[u8] = include_bytes!("../../../build/user/la-memory.elf");
+    #[cfg(all(not(feature = "la-memory-test"), feature = "la-cow-oom-test"))]
+    const UAPP_ELF: &[u8] = include_bytes!("../../../build/user/la-cow-stress.elf");
+    #[cfg(all(not(feature = "la-memory-test"), feature = "la-preempt-test"))]
+    const UAPP_ELF: &[u8] = include_bytes!("../../../build/user/la-preempt.elf");
+    #[cfg(all(
+        not(feature = "la-memory-test"),
+        not(feature = "la-cow-oom-test"),
+        not(feature = "la-preempt-test"),
+        feature = "la-pipe-test"
+    ))]
+    const UAPP_ELF: &[u8] = include_bytes!("../../../build/user/la-pipe.elf");
+    #[cfg(all(
+        not(feature = "la-memory-test"),
+        not(feature = "la-cow-oom-test"),
+        not(feature = "la-preempt-test"),
+        not(feature = "la-pipe-test"),
+        feature = "la-dir-test"
+    ))]
     const UAPP_ELF: &[u8] = include_bytes!("../../../build/user/la-dir.elf");
-    #[cfg(all(not(feature = "la-dir-test"), feature = "la-fd-ops-test"))]
+    #[cfg(all(
+        not(feature = "la-memory-test"),
+        not(feature = "la-cow-oom-test"),
+        not(feature = "la-preempt-test"),
+        not(feature = "la-pipe-test"),
+        not(feature = "la-dir-test"),
+        feature = "la-fd-ops-test"
+    ))]
     const UAPP_ELF: &[u8] = include_bytes!("../../../build/user/la-fd-ops.elf");
     #[cfg(all(
+        not(feature = "la-memory-test"),
+        not(feature = "la-cow-oom-test"),
+        not(feature = "la-preempt-test"),
+        not(feature = "la-pipe-test"),
         not(feature = "la-dir-test"),
         not(feature = "la-fd-ops-test"),
         feature = "la-file-test"
     ))]
     const UAPP_ELF: &[u8] = include_bytes!("../../../build/user/la-file.elf");
     #[cfg(all(
+        not(feature = "la-memory-test"),
+        not(feature = "la-cow-oom-test"),
+        not(feature = "la-preempt-test"),
+        not(feature = "la-pipe-test"),
         not(feature = "la-dir-test"),
         not(feature = "la-fd-ops-test"),
         not(feature = "la-file-test"),
@@ -33,6 +67,10 @@ pub fn initial_user_image() -> &'static [u8] {
     ))]
     const UAPP_ELF: &[u8] = include_bytes!("../../../build/user/la-exec.elf");
     #[cfg(all(
+        not(feature = "la-memory-test"),
+        not(feature = "la-cow-oom-test"),
+        not(feature = "la-preempt-test"),
+        not(feature = "la-pipe-test"),
         not(feature = "la-dir-test"),
         not(feature = "la-fd-ops-test"),
         not(feature = "la-file-test"),
@@ -41,6 +79,11 @@ pub fn initial_user_image() -> &'static [u8] {
     ))]
     const UAPP_ELF: &[u8] = include_bytes!("../../../build/user/la-process.elf");
     #[cfg(not(any(
+        feature = "la-memory-test",
+        feature = "la-cow-oom-test",
+        feature = "la-console-test",
+        feature = "la-preempt-test",
+        feature = "la-pipe-test",
         feature = "la-dir-test",
         feature = "la-fd-ops-test",
         feature = "la-file-test",
@@ -51,8 +94,11 @@ pub fn initial_user_image() -> &'static [u8] {
     UAPP_ELF
 }
 
-/// LoongArch 尚未接入时钟中断，首任务仅以同步 trap 运行。
-pub fn prepare_first_task(_hartid: usize) {}
+/// 启动首任务前打开本核定时器；异步调度只在用户来源的 trap 上发生。
+pub fn prepare_first_task(_hartid: usize) {
+    super::interrupt::init();
+    super::timer::init();
+}
 
 /// 内核栈指针、返回地址以及 LoongArch ABI 的被调用方保存寄存器。
 #[repr(C)]

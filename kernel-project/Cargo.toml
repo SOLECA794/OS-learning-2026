@@ -52,6 +52,16 @@ la-file-test = []
 la-fd-ops-test = []
 # LoongArch 目录、元数据和 dup2 原生用户态验收模式。
 la-dir-test = []
+# LoongArch pipe、FD 重定向与失败回滚原生用户态验收模式。
+la-pipe-test = []
+# LoongArch 周期时钟触发用户态任务抢占的原生验收模式。
+la-preempt-test = []
+# LoongArch brk、匿名 mmap 与 munmap 原生用户态验收模式。
+la-memory-test = []
+# LoongArch M2.8 COW 分配失败注入，用户镜像复用原生 fork/COW 用例。
+la-cow-oom-test = []
+# LoongArch QEMU virt UART RX/阻塞读唤醒原生用户态验收。
+la-console-test = []
 
 [profile.dev]
 panic = "abort"

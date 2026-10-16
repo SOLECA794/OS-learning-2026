@@ -175,7 +175,7 @@ fn read_console(buf: usize, len: usize) -> isize {
                 .map(|_| n as isize)
                 .unwrap_or_else(|e| e);
         }
-        // LA 尚无串口 RX 中断，空输入返回 EAGAIN，不让任务永远睡眠。
+        // 只有声明支持 RX IRQ 的平台才允许把空读登记为等待态。
         if !task::block_current_on_console_if_empty() {
             return -11;
         }
@@ -272,7 +272,7 @@ pub fn sys_write(fd: usize, buf: usize, len: usize) -> isize {
         }
         FdEntry::File(desc) => desc.write(&bytes).map(|n| n as isize).unwrap_or_else(|e| e),
         FdEntry::PipeWrite(pipe) => pipe.write(&bytes) as isize,
-        FdEntry::PipeRead(_) => -EINVAL,
+        FdEntry::PipeRead(_) => EINVAL,
     }
 }
 
@@ -322,21 +322,36 @@ pub fn sys_dup2(oldfd: usize, newfd: usize) -> isize {
     .unwrap_or_else(|e| e)
 }
 
-/// pipe(fds_ptr)：创建管道，fds[0]=读端，fds[1]=写端。
+/// pipe(fds_ptr)：先准备完整用户输出区域，再创建两个 FD；失败时回收已发布槽。
 pub fn sys_pipe(fds_ptr: usize) -> isize {
     use crate::kernel::fs::Pipe;
+    if let Err(e) = prepare_output(fds_ptr, 2 * core::mem::size_of::<u32>()) {
+        return e;
+    }
     let pipe = Pipe::new();
     let result = task::with_current_fds(|fds| {
         let read_fd = fds.alloc(FdEntry::PipeRead(pipe.clone()))?;
-        let write_fd = fds.alloc(FdEntry::PipeWrite(pipe.clone()))?;
+        let write_fd = match fds.alloc(FdEntry::PipeWrite(pipe.clone())) {
+            Ok(fd) => fd,
+            Err(e) => {
+                // 第二次分配失败时不留下只有读端的半创建管道。
+                let _ = fds.close(read_fd);
+                return Err(e);
+            }
+        };
         Ok([read_fd, write_fd])
     });
     match result {
         Ok([r, w]) => {
-            if super::copy_bytes_to_user(fds_ptr, &(r as u32).to_ne_bytes()).is_err() {
-                return super::EFAULT;
-            }
-            if super::copy_bytes_to_user(fds_ptr + 4, &(w as u32).to_ne_bytes()).is_err() {
+            let mut bytes = [0u8; 2 * core::mem::size_of::<u32>()];
+            bytes[..4].copy_from_slice(&(r as u32).to_ne_bytes());
+            bytes[4..].copy_from_slice(&(w as u32).to_ne_bytes());
+            if super::copy_bytes_to_user(fds_ptr, &bytes).is_err() {
+                // 写回失败不把内核内已分配 FD 遗留给用户进程。
+                task::with_current_fds(|fds| {
+                    let _ = fds.close(r);
+                    let _ = fds.close(w);
+                });
                 return super::EFAULT;
             }
             0

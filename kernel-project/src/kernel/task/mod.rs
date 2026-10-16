@@ -248,36 +248,29 @@ pub(crate) fn schedule() {
         let next = match sched.ready.pop_front() {
             Some(next) => next,
             None => {
-                // LoongArch 尚无异步唤醒源；队列空时只允许安全停驻。
-                #[cfg(feature = "arch-loongarch64")]
-                arch::park();
-                #[cfg(feature = "arch-riscv64")]
-                {
-                    let awaiting_console = sched
-                        .tasks
-                        .iter()
-                        .flatten()
-                        .any(|t| t.state == TaskState::WaitingConsole);
-                    drop(sched);
-                    if !awaiting_console {
-                        crate::log_info!("[sched] ready queue empty, parking");
-                        crate::arch::park();
-                    }
-                    crate::log_info!("[sched] idle waiting for console input");
-                    // 当前任务内核栈充当临时 idle 栈；被 IRQ 唤醒后仍从此处继续。
-                    // 没有并发退出/回收该任务：单 hart，SIE 仅在 idle_once 中打开。
-                    loop {
-                        if !SCHED.lock().ready.is_empty() {
-                            break;
-                        }
-                        arch::interrupt::idle_once();
-                    }
-                    sched = SCHED.lock();
-                    sched
-                        .ready
-                        .pop_front()
-                        .expect("idle woke without a ready task")
+                let awaiting_console = sched
+                    .tasks
+                    .iter()
+                    .flatten()
+                    .any(|t| t.state == TaskState::WaitingConsole);
+                drop(sched);
+                if !awaiting_console {
+                    crate::log_info!("[sched] ready queue empty, parking");
+                    crate::arch::park();
                 }
+                crate::log_info!("[sched] idle waiting for console input");
+                // 当前任务内核栈充当临时 idle 栈；硬件中断只在等待窗口内使能。
+                loop {
+                    if !SCHED.lock().ready.is_empty() {
+                        break;
+                    }
+                    arch::interrupt::idle_once();
+                }
+                sched = SCHED.lock();
+                sched
+                    .ready
+                    .pop_front()
+                    .expect("idle woke without a ready task")
             }
         };
         if next == current {
@@ -600,7 +593,6 @@ pub(crate) fn block_current_on_console_if_empty() -> bool {
 
 /// UART IRQ 在字节进入 RX 队列后调用；只改变 task 状态，不消费字节。
 /// 多个读者可一起唤醒并重新竞争字节，未拿到数据者会再次等待。
-#[cfg(feature = "arch-riscv64")]
 pub(crate) fn wake_console_readers() {
     let mut sched = SCHED.lock();
     for id in 0..sched.tasks.len() {
@@ -608,6 +600,7 @@ pub(crate) fn wake_console_readers() {
             if t.state == TaskState::WaitingConsole {
                 t.state = TaskState::Ready;
                 sched.ready.push_back(id);
+                crate::log_info!("[console] waking task {}", id);
             }
         }
     }

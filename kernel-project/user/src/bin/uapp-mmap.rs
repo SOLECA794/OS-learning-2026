@@ -2,9 +2,7 @@
 #![no_main]
 
 //! mmap/munmap 验收：
-//! M1: mmap(0, 4096, ...) 返回非零地址
-//! M2: 写入读回验证
-//! M3: munmap 后访问应触发缺页（简单验证 munmap 返回 0）
+//! 验证匿名多页映射、部分 munmap 拆分、缺页错误和剩余区域清理。
 
 use core::arch::asm;
 
@@ -41,34 +39,59 @@ fn putstr(s: &str) {
 
 #[no_mangle]
 extern "C" fn _start() -> ! {
-    // M1: mmap 4096 字节匿名映射
-    let addr = syscall(SYS_MMAP, [0, 4096, 3, 0x20, 0, 0]);
+    // mmap 零长度按 Linux ABI 返回 EINVAL。
+    if syscall(SYS_MMAP, [0, 0, 3, 0x20, 0, 0]) != -22 {
+        putstr("mmap-zero-FAIL");
+        syscall(SYS_EXIT, [1, 0, 0, 0, 0, 0]);
+        loop {}
+    }
+
+    // 建立三页匿名映射，分别写入首尾页作为保留映射的哨兵。
+    let addr = syscall(SYS_MMAP, [0, 3 * 4096, 3, 0x20, 0, 0]);
     if addr > 0 {
-        putstr("M1");
     } else {
         putstr("m1-FAIL");
+        syscall(SYS_EXIT, [1, 0, 0, 0, 0, 0]);
+        loop {}
     }
-
-    // M2: 写入读回
     unsafe {
         (addr as *mut u8).write(0x42);
-    }
-    let val = unsafe { (addr as *const u8).read() };
-    if val == 0x42 {
-        putstr("M2");
-    } else {
-        putstr("m2-FAIL");
+        ((addr + 2 * 4096) as *mut u8).write(0x24);
     }
 
-    // M3: munmap
-    let ret = syscall(SYS_MUNMAP, [addr as usize, 4096, 0, 0, 0, 0]);
-    if ret == 0 {
-        putstr("M3");
-    } else {
-        putstr("m3-FAIL");
+    // 非页对齐地址和零长度都按 Linux munmap 语义拒绝，且不破坏原映射。
+    if syscall(SYS_MUNMAP, [addr as usize + 1, 4096, 0, 0, 0, 0]) != -22
+        || syscall(SYS_MUNMAP, [addr as usize, 0, 0, 0, 0, 0]) != -22
+    {
+        putstr("munmap-arguments-FAIL");
+        syscall(SYS_EXIT, [1, 0, 0, 0, 0, 0]);
+        loop {}
     }
 
-    putstr(" MMAP-PASS");
+    // 只解除中间页：首尾页继续可用，缺页上的 copy_from_user 返回 EFAULT。
+    let ret = syscall(SYS_MUNMAP, [addr as usize + 4096, 4096, 0, 0, 0, 0]);
+    let (first, last) = unsafe {
+        (
+            (addr as *const u8).read(),
+            ((addr + 2 * 4096) as *const u8).read(),
+        )
+    };
+    let hole = syscall(SYS_WRITE, [1, addr as usize + 4096, 1, 0, 0, 0]);
+    if ret != 0 || first != 0x42 || last != 0x24 || hole != -14 {
+        putstr("munmap-FAIL");
+        syscall(SYS_EXIT, [1, 0, 0, 0, 0, 0]);
+        loop {}
+    }
+
+    // 最后清理包含已解除洞的完整区间，剩余用户页都应回收。
+    let ret = syscall(SYS_MUNMAP, [addr as usize, 3 * 4096, 0, 0, 0, 0]);
+    if ret != 0 {
+        putstr("munmap-cleanup-FAIL");
+        syscall(SYS_EXIT, [1, 0, 0, 0, 0, 0]);
+        loop {}
+    }
+
+    putstr("MMAP-PASS");
     syscall(SYS_EXIT, [0, 0, 0, 0, 0, 0]);
     loop {}
 }

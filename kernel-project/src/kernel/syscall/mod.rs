@@ -68,7 +68,6 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
         SYSCALL_MKDIRAT => fd::sys_mkdirat(args[0], args[1], args[2]),
         SYSCALL_DUP => fd::sys_dup(args[0]),
         SYSCALL_DUP2 => fd::sys_dup2(args[0], args[1]),
-        #[cfg(feature = "arch-riscv64")]
         SYSCALL_PIPE => fd::sys_pipe(args[0]),
         SYSCALL_GETDENTS64 => fd::sys_getdents64(args[0], args[1], args[2]),
         // 两个架构都由共享 task owner 处理进程生命周期。
@@ -81,39 +80,46 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
         // wait4(pid, wstatus, options, rusage)：仅 pid/wstatus/options，rusage 忽略。
         SYSCALL_WAIT4 => sys_wait4(args[0], args[1], args[2]),
         // brk(new_brk)：设置 program break；new_brk=0 返回当前 break。
-        #[cfg(feature = "arch-riscv64")]
         SYSCALL_BRK => match crate::kernel::task::with_current_space(|space| space.brk(args[0])) {
             Some(Ok(addr)) => addr as isize,
-            _ => -ENOMEM,
+            _ => ENOMEM,
         },
         // mmap(addr, len, prot, flags, fd, offset)：当前只支持匿名 RW 映射。
-        #[cfg(feature = "arch-riscv64")]
         SYSCALL_MMAP => {
             match crate::kernel::task::with_current_space(|space| space.mmap_anon(args[1])) {
                 Some(Ok(addr)) => addr as isize,
-                _ => -ENOMEM,
+                Some(Err(crate::kernel::mm::memory_set::MemoryError::Frame(_)))
+                | Some(Err(crate::kernel::mm::memory_set::MemoryError::AreaLimit)) => ENOMEM,
+                Some(Err(_)) | None => EINVAL,
             }
         }
-        // munmap(addr, len)：按起始地址解除映射。
-        #[cfg(feature = "arch-riscv64")]
+        // munmap(addr, len)：按页范围解除用户映射。
         SYSCALL_MUNMAP => {
             match crate::kernel::task::with_current_space(|space| space.munmap(args[0], args[1])) {
                 Some(Ok(())) => 0,
-                _ => -EINVAL,
+                Some(Err(crate::kernel::mm::memory_set::MemoryError::AreaLimit)) => ENOMEM,
+                Some(Err(_)) | None => EINVAL,
             }
         }
         _ => -ENOSYS,
     }
 }
 
-/// LoongArch 控制台临时桥：保留原 stdout/stderr 行为；其他 FD 交给公共表。
-/// 待控制台写入完成 FD 化验收后，移除此分支并统一调用 `fd::sys_write`。
+/// LoongArch 控制台临时桥：只对仍指向控制台的 fd 1/2 保留旧输出语义。
+/// 重定向后的 fd 走公共 FD 表；待控制台 FD 化验收后移除此桥。
 #[cfg(feature = "arch-loongarch64")]
 fn la_write(fd: usize, ptr: usize, len: usize) -> isize {
     if fd == 0 {
         return EBADF;
     }
-    if fd != 1 && fd != 2 {
+    let console_output = (fd == 1 || fd == 2)
+        && crate::kernel::task::with_current_fds(|fds| {
+            matches!(
+                fds.get(fd),
+                Some(crate::kernel::task::fd_table::FdEntry::ConsoleOutput)
+            )
+        });
+    if !console_output {
         return fd::sys_write(fd, ptr, len);
     }
     if len > crate::kernel::mm::address::PAGE_SIZE {

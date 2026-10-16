@@ -510,9 +510,15 @@ impl MemorySet {
     /// mmap 匿名映射：从 mmap_top 向上分配 len 字节（页对齐），RW 用户页。
     /// 返回映射起始地址。
     pub(crate) fn mmap_anon(&mut self, len: usize) -> Result<usize, MemoryError> {
-        let len = VirtAddr::new(len).ceil()?.value();
+        if len == 0 {
+            return Err(MemoryError::Address(AddressError::InvalidRange));
+        }
+        let pages = VirtAddr::new(len).ceil()?.value();
+        let len = pages
+            .checked_mul(super::address::PAGE_SIZE)
+            .ok_or(AddressError::Overflow)?;
         let start = self.mmap_top;
-        let end = VirtAddr::new(start.value() + len);
+        let end = start.checked_add(len)?;
         let range = AddressRange::new(start, end)?;
         let area = MapArea::new(
             range,
@@ -524,9 +530,102 @@ impl MemorySet {
         Ok(start.value())
     }
 
-    /// munmap：按起始地址删除映射并释放物理页。
+    /// munmap：按页范围拆分/删除用户映射，并释放对应物理页。
     pub(crate) fn munmap(&mut self, addr: usize, len: usize) -> Result<(), MemoryError> {
-        self.remove(VirtAddr::new(addr))
+        if len == 0 {
+            return Err(MemoryError::Address(AddressError::InvalidRange));
+        }
+        if !VirtAddr::new(addr).is_page_aligned() {
+            return Err(MemoryError::Address(AddressError::Unaligned));
+        }
+        let end = addr.checked_add(len).ok_or(AddressError::Overflow)?;
+        let range =
+            VpnRange::covering(AddressRange::new(VirtAddr::new(addr), VirtAddr::new(end))?)?;
+
+        // 先计算拆分所需的空槽，确保资源不足时不留下半解除映射状态。
+        let split_count = self
+            .areas
+            .iter()
+            .flatten()
+            .filter(|area| {
+                area.map_type == MapType::Framed
+                    && area.permissions.contains(MapPermission::USER)
+                    && area.range.start() < range.start()
+                    && range.end() < area.range.end()
+                    && area.range.overlaps(range)
+            })
+            .count();
+        let mut free_slots = self.areas.iter().position(Option::is_none);
+        if split_count != 0 {
+            let free_count = self.areas.iter().filter(|slot| slot.is_none()).count();
+            if free_count < split_count {
+                return Err(MemoryError::AreaLimit);
+            }
+        }
+
+        let mut changed = false;
+        for slot in 0..self.areas.len() {
+            let Some(area) = self.areas[slot] else {
+                continue;
+            };
+            if area.map_type != MapType::Framed
+                || !area.permissions.contains(MapPermission::USER)
+                || !area.range.overlaps(range)
+            {
+                continue;
+            }
+
+            let remove_start = core::cmp::max(area.range.start(), range.start());
+            let remove_end = core::cmp::min(area.range.end(), range.end());
+            let mut vpn = remove_start;
+            while vpn < remove_end {
+                if let Ok(ppn) = self.page_table.unmap(vpn) {
+                    // SAFETY: 本地址空间的用户叶子已解绑；COW 引用按共享计数释放。
+                    unsafe { frame_allocator::deallocate_cow(ppn) };
+                    self.cow_pages.remove(&vpn);
+                }
+                vpn = vpn.checked_add(1)?;
+            }
+
+            let keep_left = area.range.start() < remove_start;
+            let keep_right = remove_end < area.range.end();
+            match (keep_left, keep_right) {
+                (true, true) => {
+                    let left = VpnRange::new(area.range.start(), remove_start)?;
+                    let right = VpnRange::new(remove_end, area.range.end())?;
+                    self.areas[slot] = Some(MapArea {
+                        range: left,
+                        ..area
+                    });
+                    let right_slot = free_slots.expect("preflight reserved split area slot");
+                    self.areas[right_slot] = Some(MapArea {
+                        range: right,
+                        ..area
+                    });
+                    free_slots = self.areas.iter().position(Option::is_none);
+                }
+                (true, false) => {
+                    self.areas[slot] = Some(MapArea {
+                        range: VpnRange::new(area.range.start(), remove_start)?,
+                        ..area
+                    });
+                }
+                (false, true) => {
+                    self.areas[slot] = Some(MapArea {
+                        range: VpnRange::new(remove_end, area.range.end())?,
+                        ..area
+                    });
+                }
+                (false, false) => self.areas[slot] = None,
+            }
+            changed = true;
+        }
+
+        if changed {
+            // 当前内核只支持单 hart 执行任务；解除活动地址空间映射后刷新本核 TLB。
+            crate::arch::mm::flush_tlb();
+        }
+        Ok(())
     }
 
     /// 把已映射的用户可读页复制到内核拥有的缓冲区，不向外暴露用户页借用。
@@ -841,7 +940,7 @@ pub(crate) fn self_test() {
 
 /// M2.8 定向自检：逐个物理帧分配点注入一次 OOM，验证 COW fork 原子性与释放。
 /// 独立测试地址空间不进入调度器，运行时只占用 bootstrap hart。
-#[cfg(all(feature = "m28-frame-fault-test", feature = "arch-riscv64"))]
+#[cfg(feature = "m28-frame-fault-test")]
 pub(crate) fn test_cow_allocation_failures() {
     fn fixture(layout: KernelImageLayout, memory_end: VirtAddr) -> MemorySet {
         let mut space = MemorySet::new_kernel(layout, memory_end).expect("OOM fixture kernel map");
@@ -929,6 +1028,29 @@ pub(crate) fn test_cow_allocation_failures() {
         assert_eq!(frame_allocator::test_shared_ref_entries(), baseline_refs);
     }
     crate::log_info!("M28-FRAME-OOM-PASS points={}", allocation_points);
+
+    // 重复构造、COW 复制并释放地址空间，确认 LA/RV 页表树与共享引用均可复用。
+    for round in 0..128 {
+        let mut parent = fixture(layout, memory_end);
+        let child = parent
+            .dup_cow(layout, memory_end)
+            .expect("COW reclaim fixture fork");
+        drop(child);
+        drop(parent);
+        assert_eq!(
+            frame_allocator::allocated_count(),
+            baseline_frames,
+            "COW reclaim leaked frames at round {}",
+            round
+        );
+        assert_eq!(
+            frame_allocator::test_shared_ref_entries(),
+            baseline_refs,
+            "COW reclaim leaked shared refs at round {}",
+            round
+        );
+    }
+    crate::log_info!("M28-COW-RECLAIM-PASS rounds=128 frames={}", baseline_frames);
 
     // 第二个跨页 COW 分配失败时，第一页面映射可以提前私有化，用户字节不能半写。
     let mut parent = fixture(layout, memory_end);
