@@ -33,6 +33,7 @@
 
 - 每个模块按工业级自洽标准做透，不留技术债。
 - Spike 仅用于快速定位真实 Linux 程序依赖的 syscall 集合；每个 syscall 仍按 Linux 语义补全校验、errno、边界断言和有界测试。
+- 以赛方 `oscomp/tests-for-oskernel` 基准测例为日常刺探靶子，逐个让其 PASS，按缺失反推 syscall/功能。
 - 架构同步关卡：RV 每固化一个核心里程碑，立即同步推 LA64 到同一水平线，不让两端出现代差级分叉。
 
 ### 下一阶段
@@ -43,12 +44,15 @@
 - [x] **pipe(59) + dup2(24) 最小落地**：4KB 环形缓冲 + stdout 重定向（commit b4b68e4）。
 - [x] **mmap/munmap 匿名映射最小落地**：0x4000_0000 bump 分配 RW 用户页（commit 82f06bf；munmap 范围拆分由后续提交修正）。
 - [ ] **工业级 VMA 模型（待做）**：VMA 红黑树/B 树管理，区分匿名映射与文件映射，demand paging，munmap 范围拆分；当前仍是 bump 分配，非完整 VMA。
+- [ ] **mprotect / MAP_FIXED / 文件映射预留**：页权限切换（PROT_READ/WRITE/EXEC/NONE）、固定地址映射、文件映射接口占位。
+- [ ] **进程身份与 wait 族**：getpid/getppid/getuid/geteuid、exit_group、waitid 等基础进程状态查询与回收变体。
 - [ ] **pipe2 + dup3**：flag 语义补齐。
 
 #### P1 VFS 与存储架构升级
 
 - [x] **多后端 VFS 抽象**：`src/fs` → `src/kernel/fs`，对象安全 `VfsNode` trait 切断具体后端依赖，第二后端 staticfs（挂载 `/static`）同路径解析；RV/LA 双架构自检通过。
 - [~] **VirtIO-Block 驱动 + 块设备抽象层**：框架已建，设备探测读通（magic/version/vendor 正确），卡在 devid=0、写 Status 寄存器不生效；未实现队列下发/扇区读，磁盘保持禁用。结束 include_bytes! 内嵌 ELF。
+- [ ] **只读简单文件系统**：块设备打通后先做只读 FAT 或只读 ext2，从磁盘加载程序，替代 include_bytes! 内嵌 ELF。
 - [ ] **Page Cache 与脏页回写**：所有文件操作基于块和缓存，不是同步内存树。
 - [ ] 真正 cwd（chdir/getcwd）、unlinkat/rename。
 - [ ] **信号全链路**：POSIX 信号、sigmask、sigaltstack、sigreturn 现场恢复，不只 kill。
