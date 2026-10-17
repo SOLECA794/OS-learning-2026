@@ -23,6 +23,9 @@
 | G5 | ramfs + FD + read/write/close/dup + 小 shell | 完成 |
 | G6 | COW fork（软件 COW，双架构 PTE 无空闲位） | 完成 |
 | 卫生 | warnings 清零、COW 引用计数 debug 防护 | 完成 |
+| P0-a | brk(214) 动态堆（0x2000_0000，扩展/收缩/写入验证） | 完成（最小落地） |
+| P0-b | pipe(59) + dup2(24) 环形缓冲管道 + stdout 重定向 | 完成（最小落地） |
+| P0-c | mmap(222)/munmap(215) 匿名映射（0x4000_0000 bump） | 完成（最小落地，完整 VMA 未做） |
 
 ### 开发策略
 
@@ -34,12 +37,15 @@
 
 #### P0 动态内存与 IPC 基础（工业级 VMA 模型）
 
-- [ ] **brk + mmap/munmap**：VMA 红黑树/B 树管理，区分匿名映射与文件映射，支持 demand paging，munmap 范围拆分。不是 bump 指针。
-- [ ] **pipe/pipe2 + dup2/dup3**：shell 管道与测试框架 stdout 捕获。
+- [x] **brk 最小落地**：0x2000_0000 堆扩展/收缩/写入验证（commit 326eec9）。
+- [x] **pipe(59) + dup2(24) 最小落地**：4KB 环形缓冲 + stdout 重定向（commit b4b68e4）。
+- [x] **mmap/munmap 匿名映射最小落地**：0x4000_0000 bump 分配 RW 用户页（commit 82f06bf；munmap 范围拆分由后续提交修正）。
+- [ ] **工业级 VMA 模型（待做）**：VMA 红黑树/B 树管理，区分匿名映射与文件映射，demand paging，munmap 范围拆分；当前仍是 bump 分配，非完整 VMA。
+- [ ] **pipe2 + dup3**：flag 语义补齐。
 
 #### P1 VFS 与存储架构升级
 
-- [ ] **VirtIO-Block 驱动 + 块设备抽象层**：结束 include_bytes! 内嵌 ELF。
+- [~] **VirtIO-Block 驱动 + 块设备抽象层**：框架已建，设备探测读通（magic/version/vendor 正确），卡在 devid=0、写 Status 寄存器不生效；未实现队列下发/扇区读，磁盘保持禁用。结束 include_bytes! 内嵌 ELF。
 - [ ] **Page Cache 与脏页回写**：所有文件操作基于块和缓存，不是同步内存树。
 - [ ] 真正 cwd（chdir/getcwd）、unlinkat/rename。
 - [ ] **信号全链路**：POSIX 信号、sigmask、sigaltstack、sigreturn 现场恢复，不只 kill。
