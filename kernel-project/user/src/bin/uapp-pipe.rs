@@ -55,12 +55,18 @@ extern "C" fn _start() -> ! {
 
     // P2: 写端写 "hello"，读端读回
     let msg = b"hello";
-    let n = syscall(SYS_WRITE, [fds[1] as usize, msg.as_ptr() as usize, 5, 0, 0, 0]);
+    let n = syscall(
+        SYS_WRITE,
+        [fds[1] as usize, msg.as_ptr() as usize, 5, 0, 0, 0],
+    );
     if n != 5 {
         putstr("p2w-FAIL");
     }
     let mut buf = [0u8; 16];
-    let n = syscall(SYS_READ, [fds[0] as usize, buf.as_mut_ptr() as usize, 16, 0, 0, 0]);
+    let n = syscall(
+        SYS_READ,
+        [fds[0] as usize, buf.as_mut_ptr() as usize, 16, 0, 0, 0],
+    );
     if n == 5 && &buf[..5] == b"hello" {
         putstr("P2");
     } else {
@@ -84,7 +90,10 @@ extern "C" fn _start() -> ! {
         syscall(SYS_CLOSE, [saved_stdout as usize, 0, 0, 0, 0, 0]);
         // 从管道读回 "world"
         let mut buf2 = [0u8; 16];
-        let n = syscall(SYS_READ, [fds[0] as usize, buf2.as_mut_ptr() as usize, 16, 0, 0, 0]);
+        let n = syscall(
+            SYS_READ,
+            [fds[0] as usize, buf2.as_mut_ptr() as usize, 16, 0, 0, 0],
+        );
         if n == 5 && &buf2[..5] == b"world" {
             putstr("P3");
         } else {

@@ -28,7 +28,7 @@ const REG_QUEUE_PFN: usize = 0x03c;
 const REG_QUEUE_NOTIFY: usize = 0x044;
 const REG_INT_STATUS: usize = 0x048;
 const REG_STATUS: usize = 0x060; // legacy: Status 在 0x060
-// 设备配置空间（legacy：从 0x100 开始）
+                                 // 设备配置空间（legacy：从 0x100 开始）
 const REG_CONFIG_CAPACITY: usize = 0x100;
 
 // Status 位
@@ -146,7 +146,12 @@ impl VirtioBlk {
         let magic = self.reg_read(REG_MAGIC);
         let version = self.reg_read(REG_VERSION);
         let devid = self.reg_read(REG_DEVID);
-        crate::log_info!("[virtio-blk] probe: magic=0x{:08x} version={} devid={}", magic, version, devid);
+        crate::log_info!(
+            "[virtio-blk] probe: magic=0x{:08x} version={} devid={}",
+            magic,
+            version,
+            devid
+        );
         if magic != MAGIC || version != VERSION {
             return false;
         }
@@ -159,7 +164,11 @@ impl VirtioBlk {
         self.reg_write(REG_STATUS, STATUS_ACKNOWLEDGE);
         let st_060 = self.reg_read(0x060);
         let st_070 = self.reg_read(0x070);
-        crate::log_info!("[virtio-blk] status after ack: 0x060=0x{:02x} 0x070=0x{:02x}", st_060, st_070);
+        crate::log_info!(
+            "[virtio-blk] status after ack: 0x060=0x{:02x} 0x070=0x{:02x}",
+            st_060,
+            st_070
+        );
         // Driver
         self.reg_write(REG_STATUS, STATUS_ACKNOWLEDGE | STATUS_DRIVER);
         let st2 = self.reg_read(REG_STATUS);

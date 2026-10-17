@@ -79,10 +79,7 @@ fn mkdir(path: &[u8]) -> isize {
     mkdir_at(AT_FDCWD, path)
 }
 fn mkdir_at(dirfd: usize, path: &[u8]) -> isize {
-    syscall(
-        MKDIRAT,
-        [dirfd, path.as_ptr() as usize, 0o755, 0, 0, 0],
-    )
+    syscall(MKDIRAT, [dirfd, path.as_ptr() as usize, 0o755, 0, 0, 0])
 }
 fn seek(fd: isize, offset: isize, whence: usize) -> isize {
     syscall(LSEEK, [fd as usize, offset as usize, whence, 0, 0, 0])
@@ -90,13 +87,27 @@ fn seek(fd: isize, offset: isize, whence: usize) -> isize {
 fn pread(fd: isize, bytes: &mut [u8], offset: isize) -> isize {
     syscall(
         PREAD64,
-        [fd as usize, bytes.as_mut_ptr() as usize, bytes.len(), offset as usize, 0, 0],
+        [
+            fd as usize,
+            bytes.as_mut_ptr() as usize,
+            bytes.len(),
+            offset as usize,
+            0,
+            0,
+        ],
     )
 }
 fn pwrite(fd: isize, bytes: &[u8], offset: isize) -> isize {
     syscall(
         PWRITE64,
-        [fd as usize, bytes.as_ptr() as usize, bytes.len(), offset as usize, 0, 0],
+        [
+            fd as usize,
+            bytes.as_ptr() as usize,
+            bytes.len(),
+            offset as usize,
+            0,
+            0,
+        ],
     )
 }
 fn close(fd: isize) {
@@ -169,8 +180,7 @@ extern "C" fn _start() -> ! {
     check(static_file >= 0, b"static dirfd open");
     let mut static_bytes = [0u8; 17];
     check(
-        read(static_file, &mut static_bytes) == 17
-            && static_bytes == *b"staticfs via vfs\n",
+        read(static_file, &mut static_bytes) == 17 && static_bytes == *b"staticfs via vfs\n",
         b"static backend read",
     );
     close(static_file);
@@ -335,7 +345,10 @@ extern "C" fn _start() -> ! {
     check(write(positioned, b"abcdef") == 6, b"positioned seed");
     let alias = syscall(DUP, [positioned as usize, 0, 0, 0, 0, 0]);
     check(alias >= 0, b"positioned dup");
-    check(pread(alias, &mut two, 2) == 2 && two == *b"cd", b"pread data");
+    check(
+        pread(alias, &mut two, 2) == 2 && two == *b"cd",
+        b"pread data",
+    );
     check(seek(positioned, 0, 1) == 6, b"pread keeps cursor");
     check(pwrite(alias, b"XY", 1) == 2, b"pwrite data");
     check(seek(positioned, 0, 1) == 6, b"pwrite keeps cursor");
@@ -354,7 +367,10 @@ extern "C" fn _start() -> ! {
         syscall(PWRITE64, [positioned as usize, 0x4000_0000, 1, 0, 0, 0]) == -14,
         b"pwrite bad pointer",
     );
-    check(seek(positioned, 0, 1) == 6, b"positioned errors keep cursor");
+    check(
+        seek(positioned, 0, 1) == 6,
+        b"positioned errors keep cursor",
+    );
     check(
         pread(positioned, &mut six, 0) == 6 && six == *b"aXYdef",
         b"pwrite error keeps content",
@@ -389,10 +405,16 @@ extern "C" fn _start() -> ! {
     write(1, b"M3_POSITIONED_IO_PASS\n");
 
     // stat 编码必须来自 inode 快照，不能误把打开游标当文件大小。
-    let mut stat = StatSlot { bytes: [0xff; 128], canary: 0x12ab_34cd };
+    let mut stat = StatSlot {
+        bytes: [0xff; 128],
+        canary: 0x12ab_34cd,
+    };
     let file = opened(b"/vfs/positioned\0", 0);
     check(
-        syscall(FSTAT, [file as usize, stat.bytes.as_mut_ptr() as usize, 0, 0, 0, 0]) == 0,
+        syscall(
+            FSTAT,
+            [file as usize, stat.bytes.as_mut_ptr() as usize, 0, 0, 0, 0],
+        ) == 0,
         b"fstat file",
     );
     let file_ino = u64::from_ne_bytes(stat.bytes[8..16].try_into().unwrap());
@@ -415,7 +437,10 @@ extern "C" fn _start() -> ! {
     close(file);
     let dir = opened(b"/vfs/sub\0", DIRECTORY);
     check(
-        syscall(FSTAT, [dir as usize, stat.bytes.as_mut_ptr() as usize, 0, 0, 0, 0]) == 0,
+        syscall(
+            FSTAT,
+            [dir as usize, stat.bytes.as_mut_ptr() as usize, 0, 0, 0, 0],
+        ) == 0,
         b"fstat directory",
     );
     check(
@@ -495,7 +520,10 @@ extern "C" fn _start() -> ! {
     check(dirent(dir, b"abcde", 8, 1) == ino, b"seek dir reread");
     check(seek(dir, 1, 2) == 3, b"seek dir end plus one");
     check(
-        syscall(GETDENTS, [dir as usize, small.as_mut_ptr() as usize, 24, 0, 0, 0]) == 0,
+        syscall(
+            GETDENTS,
+            [dir as usize, small.as_mut_ptr() as usize, 24, 0, 0, 0],
+        ) == 0,
         b"seek dir beyond EOF",
     );
     check(seek(dir, 1, 0) == 1, b"seek dir index");

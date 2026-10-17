@@ -6,6 +6,7 @@
 
 ## [Unreleased]
 
+- CI 门槛复现与 fmt 修复（2026-10-17）：`cargo fmt --check` 修复 driver 与 uapp-pipe/uapp-vfs 格式；双架构×ERROR/TRACE 构建矩阵 4 组合全过；干净重建 SHA-256 一致。纯格式，无语义改动。
 - 合并 yyw 分支 92bcd1c 进 master（2026-10-17，双架构全绿）：
   - LA64 追平到 M2.8：user-trap/process/exec/上下文切换、console RX 阻塞唤醒、文件 FD/dir/file ops、pipe、单核时钟抢占、brk/mmap/munmap、COW OOM 134 点 + 128 轮回收。
   - VFS 多后端抽象：`src/fs` → `src/kernel/fs`，对象安全 `VfsNode` trait，新增第二后端 staticfs（挂载 `/static`）。
