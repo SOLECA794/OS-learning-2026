@@ -105,7 +105,12 @@ impl VirtioBlk {
     pub(crate) fn new() -> Self {
         Self {
             inner: SpinLock::new(VirtioBlkInner {
-                desc: [Desc { addr: 0, len: 0, flags: 0, next: 0 }; QUEUE_SIZE as usize],
+                desc: [Desc {
+                    addr: 0,
+                    len: 0,
+                    flags: 0,
+                    next: 0,
+                }; QUEUE_SIZE as usize],
                 avail: Avail {
                     flags: 0,
                     idx: 0,
@@ -172,12 +177,11 @@ impl VirtioBlk {
         if qnum_max == 0 {
             return false;
         }
-        // 使用队列大小 64
+        // 使用队列大小 64（不超过设备上报上限）
         let qnum = 64.min(qnum_max);
         self.reg_write(REG_QUEUE_NUM, qnum);
-        // Queue align
+        // Queue align（页对齐，legacy 模式）
         self.reg_write(REG_QUEUE_ALIGN, 0x1000);
-        // 队列物理地址：内核 identity map，虚拟地址=物理地址
         let mut inner = self.inner.lock();
         let queue_pa = inner.desc.as_ptr() as usize;
         let pfn = queue_pa / 4096;
@@ -197,7 +201,11 @@ impl VirtioBlk {
     }
 
     /// 读一个扇区（512 字节）到 buf。同步轮询。
-    pub(crate) fn read_sector(&self, sector: u64, buf: &mut [u8; SECTOR_SIZE]) -> Result<(), &'static str> {
+    pub(crate) fn read_sector(
+        &self,
+        sector: u64,
+        buf: &mut [u8; SECTOR_SIZE],
+    ) -> Result<(), &'static str> {
         let mut inner = self.inner.lock();
         if !inner.ready {
             return Err("not ready");

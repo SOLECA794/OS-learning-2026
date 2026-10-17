@@ -29,12 +29,27 @@ pub fn init() {
     }
 }
 
-/// 占位：LA 用户态功能后置（M1.5 边界，RV 验证通过后移植）。
-/// 当前无用户任务，sscratch 语义不适用，保持空实现。
-#[allow(dead_code)]
-pub fn set_user_scratch(_value: usize) {}
+/// SAVE0 协议：用户态运行时保存当前任务的内核栈顶，内核态运行时为零。
+pub fn set_user_scratch(value: usize) {
+    // SAFETY: CSRWR 的输入寄存器会被旧 CSR 值覆盖，故使用 inout 约束。
+    unsafe {
+        asm!("csrwr {value}, 0x30", value = inout(reg) value => _, options(nostack));
+    }
+}
 
-/// 占位：LA 用户态功能后置；调用即停驻（不会真正进入用户态）。
-pub fn restore_from(_context: *const TrapContext) -> ! {
-    crate::arch::park()
+/// 从内核栈上的现场经 ERTN 进入或返回用户态。
+pub fn restore_from(context: *const TrapContext) -> ! {
+    unsafe extern "C" {
+        fn __loongarch64_trap_restore();
+    }
+    // SAFETY: context 是有效内核栈上的完整现场；汇编恢复现场后不返回。
+    unsafe {
+        asm!(
+            "move $r3, {context}",
+            "jirl $r0, {restore}, 0",
+            context = in(reg) context as usize,
+            restore = in(reg) __loongarch64_trap_restore as usize,
+            options(noreturn, nostack)
+        );
+    }
 }

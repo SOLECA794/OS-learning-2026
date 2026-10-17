@@ -163,6 +163,25 @@ fn dirent(fd: isize, name: &[u8], kind: u8, next: usize) -> u64 {
 
 #[no_mangle]
 extern "C" fn _start() -> ! {
+    // 第二后端经同一 open/read/目录 FD 路径可达；写入与创建须明确失败。
+    let static_dir = opened(b"/static\0", DIRECTORY);
+    let static_file = open_at(static_dir as usize, b"readme\0", 0, 0);
+    check(static_file >= 0, b"static dirfd open");
+    let mut static_bytes = [0u8; 17];
+    check(
+        read(static_file, &mut static_bytes) == 17
+            && static_bytes == *b"staticfs via vfs\n",
+        b"static backend read",
+    );
+    close(static_file);
+    check(
+        open(b"/static/missing\0", 2 | CREATE) == -30,
+        b"static backend readonly",
+    );
+    check(dirent(static_dir, b"readme", 8, 1) != 0, b"static dirent");
+    close(static_dir);
+    write(1, b"VFS_STATIC_PASS\n");
+
     // 路径逐段解析，失败不能创建错误节点。
     check(
         mkdir(b"/vfs\0") == 0 && mkdir(b"/vfs/sub\0") == 0,

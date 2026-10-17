@@ -73,21 +73,26 @@ kernel-project/
 ├── linker/            # riscv64.ld（0x80200000）、loongarch64.ld（0x00200000）
 ├── tools/             # kconfig.py（自研解析器）、check-image.py（映像门禁）
 ├── src/arch/          # 唯一架构差异入口：riscv64 / loongarch64
-├── src/kernel/        # 核心子系统：mm、trap、elf、task（含 FD 表）、syscall
-├── src/fs/            # 最小 VFS：路径解析、打开描述、分层 ramfs、boot 程序源
+├── src/kernel/        # 核心子系统：mm、trap、elf、task、syscall、fs
+│   └── fs/            # VFS、ramfs、固定只读 staticfs 后端与 boot 程序源
 ├── src/klib/          # 内核通用库
 ├── docs/              # 设计文档 00–10
 └── log/               # boundary / change-record 等证据（见 ../sdd-governance/）
 ```
 
-## 当前状态表（2026-10-14）
+## 当前状态表（2026-10-15）
 
 按 `docs/08-development-process.md` 的竞赛里程碑口径，**RISC-V 已通过 M2.5 基础文件线验收**：
 最小 VFS/ramfs、目录与 FD、控制台输入、脚本 shell、按路径执行 ELF/传参/等待退出。
 验收使用自有用户程序，不代表已兼容 Linux 全量文件系统 ABI 或通过 LTP。
 RISC-V M2.8 的 COW/回收固定范围已完成：父子和内核写入隔离、`wait4` 失败重试、
 物理帧分配故障注入、128 轮重复回收均通过 QEMU 验收。
-LoongArch 的已运行验证边界是 M1，后续用户态能力不能由编译通过推断。
+LoongArch 已在 QEMU 完成 M1.5 用户态、M2 同步 `fork/exit/wait4`、父子 COW 栈隔离与 `execve`；
+M2.5 用户态 `openat/read/close` 文件读取、普通文件 `write/lseek/pread64/pwrite64/dup`
+共享游标、`mkdirat/getdents64/fstat/dup2`，以及 `pipe` 与 fd 1 重定向已通过定向测试。
+LoongArch 用户栈顶已恢复到与 RISC-V 一致的 `0x7f00_0000`；fork/COW、exec、目录、pipe、
+brk/匿名 mmap/munmap 在该布局下通过定向验收；单核用户态时钟抢占与 QEMU virt 串口 RX 唤醒也已验收。
+多核、M2.8 完整资源压力覆盖及完整 Linux FD/文件 ABI 仍未对齐 RISC-V。
 
 | 能力 | 状态 | 验证证据 |
 |---|---|---|
@@ -95,18 +100,28 @@ LoongArch 的已运行验证边界是 M1，后续用户态能力不能由编译�
 | Kconfig → build.mk → Cargo feature 构建链 | 已实现，有已知限制 | 见下方已知限制 ③④ |
 | 双架构 boot（RV 0x80200000 / LA 0x200000） | **运行验证通过** | QEMU 9.2.1 双架构 M0/M1 启动日志（log/change/） |
 | 分页激活 + heap（M1） | **运行验证通过** | 双架构 QEMU 至 "M1 paging/trap foundation OK"；页帧回收和临时 MemorySet 映射/回收自检见 `log/change/2026-10-14-M3-frame-reuse-both-arch.md`、`log/change/2026-10-14-M3-memoryset-both-arch.md` |
-| RV 用户态 / syscall 闭环（M1.5） | **运行验证通过** | QEMU 输出 "hello from user mode" → "user program exited with code 0"（log/change/2026-10-12-M15-usermode.md）；LA 用户态功能后置（占位 stub，编译通过） |
+| 双架构用户态 / 最小 syscall（M1.5） | **双架构定向运行验证通过** | RV 原有用户态验收；LA 原生 ELF 在 PLV3 输出 `LA_USER_WRITE_PASS`，验证 EFAULT/ENOSYS 返回后 `exit(0)`，见 `log/rfc/LA-M15-user-trap/index.md` |
 | RV 进程线（调度、fork/exec/exit/wait） | **运行验证通过**（M2 范围） | `log/change/2026-10-12-W3-context-switch-and-timer.md`、`2026-10-12-W4-process-lifecycle.md`；2026-10-14 shell 回归 |
 | RV ramfs/FD/脚本 shell | **运行验证通过**（M2.5 基础范围） | `artifacts/runs/process-20261014-vfs-boundary/`、`shell-20261014-vfs-boundary/` |
+| RV brk / 匿名 mmap / pipe+dup2 | **定向运行验证通过** | 合并 `master` 后 `test-brk`、`test-mmap`、`test-pipe` 均在比赛镜像 QEMU 通过；见 `log/change/2026-10-15-merge-master-into-yyw.md` |
 | RV 控制台输入 | **QEMU 定向测试通过** | `artifacts/runs/console-20261014-vfs-boundary/`；读者等待期间其它任务仍运行，输入后输出 `INPUT_PASS` |
 | RV 最小 VFS / 目录 / mkdirat | **运行验证通过**（M2.5 基础范围） | `log/rfc/M25-vfs/index.md`；`artifacts/runs/vfs-20261014-vfs-boundary/`，V1–V6 / `VFS_EXEC_ARGS_PASS` / `VFS_PASS` |
+| `kernel/fs` 迁移 + 第二只读后端 | **双架构 QEMU 分层验收通过** | RISC-V `VFS_STATIC_PASS`/`VFS_PASS` 及进程、shell、控制台回归；LoongArch 内核级 `VFS_BACKENDS_PASS`，尚无 LA 用户态文件 syscall 验收；见 `log/rfc/M3-kernel-fs-vfs/index.md` |
 | RV COW fork 与内核写用户 COW 页 | **M2.8 固定范围运行验证通过** | `artifacts/runs/oom-20261014-m28-complete/`；父子/多代隔离、跨页内核写入失败后重试、131 次 fork 对应 137 次 COW 实际复制 |
 | M2.8 资源回收与失败路径 | **定向运行验证通过** | `WAIT-RETRY-PASS`；128 轮回收帧数恒为 1301；520 个子地址空间分配故障点、完整 fork 早期 9 点通过；见 `log/change/2026-10-14-M28-cow-oom.md`。文件 read/getdents64 的 EFAULT 不消费游标亦已验证 |
 | M3 首批进程/文件 ABI | **RISC-V 定向运行验证通过** | `wait4` 写回 4 字节；`openat` 四参数；目录 fd 相对路径；`lseek`；`pread64` / `pwrite64`；`fstat` 基础字段；见 `log/rfc/M3-wait4-status/`、`log/rfc/M3-openat-abi/`、`log/rfc/M3-lseek/`、`log/rfc/M3-positioned-io/`、`log/rfc/M3-fstat/` |
-| LoongArch 用户态、进程与 COW | **仅编译验证 / 尚未运行** | M1 后用户态适配未落地；LA COW 代码仅编译通过 |
+| LoongArch 进程、COW 与 exec | **同步父子闭环及 exec 定向运行验证通过** | 公共 TCB/就绪队列完成 `fork→子运行→exit→父 wait4`，双侧栈页 COW 隔离通过；`execve` 失败返回与成功切换 ELF/argv 通过。见 `log/rfc/LA-M2-process/index.md`、`log/change/2026-10-15-LA-M2-exec.md`。时钟抢占、多代/故障注入 COW 未验收 |
+| LoongArch 首批用户态文件调用 | **定向运行验证通过** | `openat/read/close` 读取 ramfs 与 staticfs；EFAULT 不消费偏移、EOF、EBADF、ENOENT 通过。见 `log/change/2026-10-15-LA-M25-file-fd.md`；完整 FD ABI 未验收 |
+| LoongArch 高地址用户栈 | **定向运行验证通过** | `0x7f00_0000` 栈顶下的 pipe、fork/COW、exec、目录用例通过；见 `log/change/2026-10-16-LA-high-user-stack.md` |
+| LoongArch 单核用户态时钟抢占与串口输入 | **定向运行验证通过** | 时钟抢占已验收；QEMU virt UART RX IRQ 可唤醒阻塞 stdin 读者，父子 `wait4` 闭环通过；见 `log/change/2026-10-16-LA-timer-preemption.md`、`log/boundary/LA-M25-console-rx.md`。多核仍未验收 |
+| 双架构多页 `mmap` / 范围 `munmap` | **QEMU 定向运行验证通过** | 零长度/非页对齐参数返回负 errno；中间页部分解除、邻页保留、洞页 EFAULT 和跨洞清理通过 |
+| LoongArch 用户态堆与匿名映射 | **定向运行验证通过** | `brk` 扩展/收缩与匿名 `mmap/munmap` 用户页读写通过；见 `log/change/2026-10-16-LA-user-memory-syscalls.md`。文件映射与完整 flags 未支持 |
+| LoongArch COW 分配失败路径 | **固定范围运行验收通过** | 134 个 MemorySet 分配故障点、128 轮内核回收及 128 次用户态 fork/COW/wait4、跨页写失败重试与 fork 早期 9 点；见 `log/change/2026-10-16-LA-M28-cow-oom.md`。520 点地址空间 OOM 压力仍只在 RV 覆盖 |
 | 有界自动运行入口 | **已接入并运行验证** | `make test`、`make test-fault`、`make test-process`、`make test-shell`、`make test-vfs`、`make test-console`、`make run-cow` |
 
-VFS 当前边界：仅 ramfs，无挂载、删除/重命名、权限模型、`.`/`..` 或真正的进程 cwd；
+VFS 当前边界：ramfs 根目录和固定 `/static` 只读后端；没有通用 mount/umount、
+删除/重命名、权限模型、`.`/`..` 或真正的进程 cwd；LoongArch 已验收本项目现有的
+文件、目录及 pipe 基础 syscall，但不等于完整 Linux 文件 ABI。
 M3 已把 RISC-V `openat=56` 切换为 Linux 四参数 `(dirfd, path, flags, mode)`：
 绝对路径忽略 dirfd；相对路径可从目录 fd 解析；当前 `AT_FDCWD` 暂指向根目录。
 旧的三参数私有调用方式已移除，仓库内用户程序均已迁移；见
@@ -122,7 +137,7 @@ M3 已把 RISC-V `openat=56` 切换为 Linux 四参数 `(dirfd, path, flags, mod
 ramfs 文件的 inode 编号与长度。uid/gid、时间戳和权限位暂无模型，不能把这些零值当作真实权限语义。
 M3 的 `wait4` ABI 切换已完成：RISC-V 状态写回使用 Linux `int` 的 4 字节宽度，
 用户态 canary 测试证明相邻字段不被覆盖，见 `log/rfc/M3-wait4-status/index.md`。
-其余 PID 组、选项、rusage 及 LoongArch 用户态等待语义仍待实现。
+LoongArch 已通过基本父子 `wait4` 状态写回与回收；其余 PID 组、选项和 rusage 仍待实现。
 
 ## 历史问题与当前限制（原 2026-10-12 审查清单）
 

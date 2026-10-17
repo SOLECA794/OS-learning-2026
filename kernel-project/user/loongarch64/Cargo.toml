@@ -1,0 +1,9 @@
+# LoongArch 专用用户态验收程序，独立于含 RISC-V ecall 的 user crate。
+[package]
+name = "la-uapp"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[profile.release]
+panic = "abort"

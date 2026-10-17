@@ -7,7 +7,7 @@
 
 2026 华东区域赛内核项目（Rust 宏内核，RV64 + LA64 双架构）。
 
-### 已完成（截至 2026-10-15）
+### 已完成（截至 2026-10-17）
 
 | 里程碑 | 内容 | 状态 |
 |---|---|---|
@@ -26,6 +26,8 @@
 | P0-a | brk(214) 动态堆（0x2000_0000，扩展/收缩/写入验证） | 完成（最小落地） |
 | P0-b | pipe(59) + dup2(24) 环形缓冲管道 + stdout 重定向 | 完成（最小落地） |
 | P0-c | mmap(222)/munmap(215) 匿名映射（0x4000_0000 bump） | 完成（最小落地，完整 VMA 未做） |
+| VFS2 | 多后端 VFS 抽象（`kernel/fs` + `VfsNode` trait + staticfs `/static`） | 完成 |
+| LA-SYNC | LA64 对齐到 M2.8（进程/exec/FD/文件/pipe/抢占/内存/COW-OOM/console） | 完成（test-la-* 10 项 PASS） |
 
 ### 开发策略
 
@@ -45,6 +47,7 @@
 
 #### P1 VFS 与存储架构升级
 
+- [x] **多后端 VFS 抽象**：`src/fs` → `src/kernel/fs`，对象安全 `VfsNode` trait 切断具体后端依赖，第二后端 staticfs（挂载 `/static`）同路径解析；RV/LA 双架构自检通过。
 - [~] **VirtIO-Block 驱动 + 块设备抽象层**：框架已建，设备探测读通（magic/version/vendor 正确），卡在 devid=0、写 Status 寄存器不生效；未实现队列下发/扇区读，磁盘保持禁用。结束 include_bytes! 内嵌 ELF。
 - [ ] **Page Cache 与脏页回写**：所有文件操作基于块和缓存，不是同步内存树。
 - [ ] 真正 cwd（chdir/getcwd）、unlinkat/rename。
@@ -52,7 +55,8 @@
 
 #### P2 架构同步与多核契约
 
-- [ ] **LA64 用户态对齐**：跟随 RV P0/P1 里程碑同步推进，不长期分叉。
+- [x] **LA64 对齐到 M2.8**：user-trap/process/exec/切换、console RX 唤醒、文件 FD/dir/file ops、pipe、单核时钟抢占、brk/mmap/munmap、COW OOM 134 点 + 128 轮回收（test-la-* 10 项 PASS）。
+- [ ] **LA64 剩余对齐**：文件 mmap/mprotect、信号、定时器频率校准、实板；跟随后续 RV P1/P2 里程碑同步，不长期分叉。
 - [ ] **SMP 数据结构预设计**：Per-CPU 调度队列、细粒度自旋锁接口预留；先跑单核负载，接口具备多核并发契约。从核唤醒、IPI 在国赛阶段落地。
 
 #### P3 阶段标尺（每阶段验收标志）

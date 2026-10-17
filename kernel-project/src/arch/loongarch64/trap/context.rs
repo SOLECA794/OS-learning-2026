@@ -64,7 +64,6 @@ impl TrapContext {
     }
 
     /// 构造用户态入口上下文：PRMD.PPLV=0b11（U 模式）+ PIE=1，sp=用户栈顶，era=入口。
-    /// M1.5 中 LA 侧 `restore_from` 为占位停驻，本构造器供 LA 用户态移植阶段使用。
     /// trap 现场保存的栈指针（$r3 槽）。
     pub const fn sp(&self) -> usize {
         self.registers[3]
@@ -80,6 +79,14 @@ impl TrapContext {
             badv: 0,
         };
         ctx.registers[3] = user_sp;
+        ctx
+    }
+
+    /// exec 成功后从新入口接收 argc/argv，而不再返回旧 syscall 现场。
+    pub fn new_user_with_args(entry: usize, user_sp: usize, argc: usize, argv: usize) -> Self {
+        let mut ctx = Self::new_user(entry, user_sp);
+        ctx.registers[4] = argc;
+        ctx.registers[5] = argv;
         ctx
     }
 

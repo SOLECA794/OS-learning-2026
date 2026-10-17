@@ -17,6 +17,9 @@ const UART_LSR: usize = 5;
 const UART_LSR_DATA_READY: u8 = 1;
 const UART_IER_RX: u8 = 1;
 
+/// UART RX 中断可唤醒内核等待队列，空读可安全阻塞。
+pub const INPUT_WAKEUP_SUPPORTED: bool = true;
+
 struct RxQueue {
     bytes: [u8; RX_CAPACITY],
     head: usize,

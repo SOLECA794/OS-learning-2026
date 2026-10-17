@@ -37,7 +37,8 @@ make ARCH=riscv64 test-cow-oom    # COW OOM 520 点注入
 | `src/kernel/task/` | TCB、调度上下文、FD 表、FIFO 调度 |
 | `src/kernel/syscall/` | Linux UAPI 兼容层：参数校验、copy_from_user、errno |
 | `src/kernel/trap.rs` | 架构无关 trap 分发 |
-| `src/fs/` | VFS + ramfs |
+| `src/kernel/fs/` | VFS + ramfs、只读 staticfs、管道 |
+| `src/drivers/` | QEMU virt 平台设备驱动 |
 | `src/klib/` | 自旋锁、日志、同步原语 |
 | `user/src/bin/` | 用户态测试程序（shell / uapp-cow / uapp-vfs 等） |
 

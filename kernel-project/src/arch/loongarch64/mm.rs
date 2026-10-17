@@ -118,6 +118,7 @@ pub const fn phys_to_virt(physical_address: usize) -> usize {
 /// QEMU virt 平台在分页后仍需访问的设备页。
 pub const fn kernel_device_ranges() -> &'static [(usize, usize)] {
     &[
+        (0x1000_0000, 0x1000_1000), // QEMU virt PCH PIC
         (0x100e_0000, 0x100e_1000), // ACPI GED reset/poweroff
         (0x1fe0_0000, 0x1fe0_1000), // NS16550A UART
     ]
@@ -131,7 +132,8 @@ global_asm!(
 __loongarch64_tlb_refill:
     csrwr $r12, 0x8b
     csrrd $r12, 0x1b
-    lddir $r12, $r12, 3
+    # PWCL 配置两级目录（Dir2/Dir1）加 PTE；先根再中间目录。
+    lddir $r12, $r12, 2
     lddir $r12, $r12, 1
     ldpte $r12, 0
     ldpte $r12, 1

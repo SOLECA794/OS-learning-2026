@@ -32,8 +32,7 @@ make clean           # 清理构建产物
 | 目录 | 职责 |
 |---|---|
 | `src/arch/` | 架构抽象与唯一架构差异入口（`riscv64` / `loongarch64`） |
-| `src/kernel/` | 核心子系统：mm、task、scheduler、syscall、trap、event、signal、ipc、usync |
-| `src/fs/` | VFS + 具体文件系统（tmpfs → ext4） |
+| `src/kernel/` | 核心子系统：mm、task、syscall、trap、fs（VFS + 具体文件系统）等 |
 | `src/driver/` | 设备驱动框架（FDT 匹配）+ 具体驱动 |
 | `src/net/` | 自研网络协议栈（socket → TCP/UDP） |
 | `src/klib/` | 通用内核库：分配器接口、锁原语、日志宏、容器工具 |

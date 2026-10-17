@@ -28,18 +28,16 @@ pub const SYSCALL_BRK: usize = 214;
 pub const SYSCALL_MUNMAP: usize = 215;
 pub const SYSCALL_MMAP: usize = 222;
 
-#[cfg(feature = "arch-riscv64")]
 mod exec;
-#[cfg(feature = "arch-riscv64")]
 mod fd;
 mod power;
 
-#[cfg(feature = "arch-riscv64")]
 pub use exec::sys_execve;
 use power::sys_reboot;
 
 /// Linux errno。
 const ENOSYS: isize = 38;
+const EBADF: isize = -9;
 const EFAULT: isize = -14;
 const ECHILD: isize = -10;
 const ENOMEM: isize = -12;
@@ -49,8 +47,8 @@ const WNOHANG: usize = 1;
 
 /// 用户可写地址区间的下界（0 页不映射，NULL 解引用受控）。
 const USER_TEXT_BASE: usize = 0x10000;
-/// 用户地址空间上界（RV：低于内核身份映射区 0x8000_0000）。
-const USER_STACK_TOP: usize = 0x7f00_0000;
+/// 用户地址空间上界由架构布局提供，并由逐页 PTE 检查进一步收紧。
+const USER_STACK_TOP: usize = crate::arch::task::INITIAL_USER_STACK_TOP;
 
 pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
     match syscall_id {
@@ -58,67 +56,88 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
         SYSCALL_REBOOT => sys_reboot(args[0] as u32, args[1] as u32, args[2] as u32, args[3]),
         #[cfg(feature = "arch-riscv64")]
         SYSCALL_WRITE => fd::sys_write(args[0], args[1], args[2]),
-        #[cfg(feature = "arch-riscv64")]
+        #[cfg(feature = "arch-loongarch64")]
+        SYSCALL_WRITE => la_write(args[0], args[1], args[2]),
         SYSCALL_READ => fd::sys_read(args[0], args[1], args[2]),
-        #[cfg(feature = "arch-riscv64")]
         SYSCALL_LSEEK => fd::sys_lseek(args[0], args[1] as i64, args[2]),
-        #[cfg(feature = "arch-riscv64")]
         SYSCALL_PREAD64 => fd::sys_pread64(args[0], args[1], args[2], args[3] as i64),
-        #[cfg(feature = "arch-riscv64")]
         SYSCALL_PWRITE64 => fd::sys_pwrite64(args[0], args[1], args[2], args[3] as i64),
-        #[cfg(feature = "arch-riscv64")]
         SYSCALL_FSTAT => fd::sys_fstat(args[0], args[1]),
-        #[cfg(feature = "arch-riscv64")]
         SYSCALL_CLOSE => fd::sys_close(args[0]),
-        #[cfg(feature = "arch-riscv64")]
         SYSCALL_OPENAT => fd::sys_openat(args[0], args[1], args[2], args[3]),
-        #[cfg(feature = "arch-riscv64")]
         SYSCALL_MKDIRAT => fd::sys_mkdirat(args[0], args[1], args[2]),
-        #[cfg(feature = "arch-riscv64")]
         SYSCALL_DUP => fd::sys_dup(args[0]),
-        #[cfg(feature = "arch-riscv64")]
         SYSCALL_DUP2 => fd::sys_dup2(args[0], args[1]),
-        #[cfg(feature = "arch-riscv64")]
         SYSCALL_PIPE => fd::sys_pipe(args[0]),
-        #[cfg(feature = "arch-riscv64")]
         SYSCALL_GETDENTS64 => fd::sys_getdents64(args[0], args[1], args[2]),
-        // exit/fork/wait4 依赖 task 模块（RV 用户态调度）；LA 用户态未实现，回落 ENOSYS。
-        #[cfg(feature = "arch-riscv64")]
+        // 两个架构都由共享 task owner 处理进程生命周期。
         SYSCALL_EXIT => crate::kernel::task::exit_current(args[0] as i32),
         // fork：返回子任务 id（>0）；子进程侧现场 a0 已置 0。
-        #[cfg(feature = "arch-riscv64")]
         SYSCALL_FORK => match crate::kernel::task::fork_current() {
             Ok(pid) => pid as isize,
             Err(errno) => errno,
         },
         // wait4(pid, wstatus, options, rusage)：仅 pid/wstatus/options，rusage 忽略。
-        #[cfg(feature = "arch-riscv64")]
         SYSCALL_WAIT4 => sys_wait4(args[0], args[1], args[2]),
         // brk(new_brk)：设置 program break；new_brk=0 返回当前 break。
-        #[cfg(feature = "arch-riscv64")]
         SYSCALL_BRK => match crate::kernel::task::with_current_space(|space| space.brk(args[0])) {
             Some(Ok(addr)) => addr as isize,
-            _ => -ENOMEM,
+            _ => ENOMEM,
         },
         // mmap(addr, len, prot, flags, fd, offset)：当前只支持匿名 RW 映射。
-        #[cfg(feature = "arch-riscv64")]
-        SYSCALL_MMAP => match crate::kernel::task::with_current_space(|space| space.mmap_anon(args[1])) {
-            Some(Ok(addr)) => addr as isize,
-            _ => -ENOMEM,
-        },
-        // munmap(addr, len)：按起始地址解除映射。
-        #[cfg(feature = "arch-riscv64")]
-        SYSCALL_MUNMAP => match crate::kernel::task::with_current_space(|space| space.munmap(args[0], args[1])) {
-            Some(Ok(())) => 0,
-            _ => -EINVAL,
-        },
+        SYSCALL_MMAP => {
+            match crate::kernel::task::with_current_space(|space| space.mmap_anon(args[1])) {
+                Some(Ok(addr)) => addr as isize,
+                Some(Err(crate::kernel::mm::memory_set::MemoryError::Frame(_)))
+                | Some(Err(crate::kernel::mm::memory_set::MemoryError::AreaLimit)) => ENOMEM,
+                Some(Err(_)) | None => EINVAL,
+            }
+        }
+        // munmap(addr, len)：按页范围解除用户映射。
+        SYSCALL_MUNMAP => {
+            match crate::kernel::task::with_current_space(|space| space.munmap(args[0], args[1])) {
+                Some(Ok(())) => 0,
+                Some(Err(crate::kernel::mm::memory_set::MemoryError::AreaLimit)) => ENOMEM,
+                Some(Err(_)) | None => EINVAL,
+            }
+        }
         _ => -ENOSYS,
     }
 }
 
+/// LoongArch 控制台临时桥：只对仍指向控制台的 fd 1/2 保留旧输出语义。
+/// 重定向后的 fd 走公共 FD 表；待控制台 FD 化验收后移除此桥。
+#[cfg(feature = "arch-loongarch64")]
+fn la_write(fd: usize, ptr: usize, len: usize) -> isize {
+    if fd == 0 {
+        return EBADF;
+    }
+    let console_output = (fd == 1 || fd == 2)
+        && crate::kernel::task::with_current_fds(|fds| {
+            matches!(
+                fds.get(fd),
+                Some(crate::kernel::task::fd_table::FdEntry::ConsoleOutput)
+            )
+        });
+    if !console_output {
+        return fd::sys_write(fd, ptr, len);
+    }
+    if len > crate::kernel::mm::address::PAGE_SIZE {
+        return -22;
+    }
+    if len == 0 {
+        return 0;
+    }
+    let bytes = match copy_from_user(ptr, len) {
+        Ok(bytes) => bytes,
+        Err(errno) => return errno,
+    };
+    crate::arch::console::kernel_arch_console_write(bytes.as_ptr(), bytes.len());
+    len as isize
+}
+
 /// 校验用户地址区间和逐页 PTE，并返回由内核拥有的数据副本。
 /// 不延长用户页引用生命周期；exec/fork/exit 后副本仍独立有效。
-#[cfg(feature = "arch-riscv64")]
 pub(crate) fn copy_from_user(src: usize, len: usize) -> Result<alloc::vec::Vec<u8>, isize> {
     if len == 0 {
         return Ok(alloc::vec::Vec::new());
@@ -136,7 +155,6 @@ pub(crate) fn copy_from_user(src: usize, len: usize) -> Result<alloc::vec::Vec<u
 ///
 /// 逐页读取直到 null，避免字符串在当前页已结束时误触碰下一张未映射页。
 /// 单次片段仍使用 `copy_from_user` 的地址及 PTE 检查。
-#[cfg(feature = "arch-riscv64")]
 pub(crate) fn copy_cstring_from_user(
     src: usize,
     max_len: usize,
@@ -157,7 +175,6 @@ pub(crate) fn copy_cstring_from_user(
     Err(EFAULT)
 }
 /// 向用户地址空间写字节：映射权限与 COW 由 MemorySet 统一判定。
-#[cfg(feature = "arch-riscv64")]
 pub(crate) fn copy_bytes_to_user(dst: usize, data: &[u8]) -> Result<(), isize> {
     if data.is_empty() {
         return Ok(());
@@ -172,7 +189,6 @@ pub(crate) fn copy_bytes_to_user(dst: usize, data: &[u8]) -> Result<(), isize> {
 }
 
 /// 写回 Linux `int` 宽度的 wait status；按字节复制，不形成未对齐用户引用。
-#[cfg(feature = "arch-riscv64")]
 fn copy_wait_status_to_user(dst: usize, value: i32) -> Result<(), isize> {
     copy_bytes_to_user(dst, &value.to_ne_bytes())
 }
@@ -180,7 +196,6 @@ fn copy_wait_status_to_user(dst: usize, value: i32) -> Result<(), isize> {
 /// wait4(pid, wstatus, options)：阻塞循环——子已退出则先写 status，再提交回收；
 /// 写回失败保留僵尸供重试。wstatus 按 Linux `int` 写入 4 字节。
 /// 未退出则 Waiting 阻塞（子 exit 唤醒后重查），无子返回 ECHILD，WNOHANG 时不阻塞返回 0。
-#[cfg(feature = "arch-riscv64")]
 fn sys_wait4(pid: usize, status_ptr: usize, options: usize) -> isize {
     loop {
         match crate::kernel::task::wait4_step(pid as isize) {

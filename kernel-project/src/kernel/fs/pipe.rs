@@ -3,8 +3,8 @@
 //! 容量固定 4096 字节；读空时 read 返回 0（EOF 语义暂不阻塞，先做非阻塞版本）。
 //! 写满时 write 返回已写字节数（写不下的部分丢弃，后续扩展为阻塞）。
 
-use alloc::sync::Arc;
 use crate::klib::sync::SpinLock;
+use alloc::sync::Arc;
 
 const PIPE_CAP: usize = 4096;
 

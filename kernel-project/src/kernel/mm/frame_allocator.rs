@@ -418,7 +418,12 @@ pub(crate) fn cow_retain(ppn: PhysPageNum) {
     let entry = refs.entry(ppn.value()).or_insert(1);
     *entry += 1;
     // 合理上限：单页被超过 64 个映射共享通常意味着引用计数配对出错。
-    debug_assert!(*entry <= 64, "cow_retain: ppn={:?} ref count overflow {}", ppn, *entry);
+    debug_assert!(
+        *entry <= 64,
+        "cow_retain: ppn={:?} ref count overflow {}",
+        ppn,
+        *entry
+    );
 }
 
 /// COW 感知释放：释放调用方持有的一个映射引用。
@@ -432,7 +437,11 @@ pub(super) unsafe fn deallocate_cow(ppn: PhysPageNum) {
     let mut refs = FRAME_REFS.lock();
     match refs.get_mut(&ppn.value()) {
         Some(count) => {
-            debug_assert!(*count >= 1, "deallocate_cow: ppn={:?} ref count already 0", ppn);
+            debug_assert!(
+                *count >= 1,
+                "deallocate_cow: ppn={:?} ref count already 0",
+                ppn
+            );
             *count -= 1;
             if *count == 0 {
                 refs.remove(&ppn.value());

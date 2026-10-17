@@ -1,7 +1,8 @@
 //! 内核主流程（docs/01 §4 启动流程）。
 //!
 //! 当前启动链：
-//!   arch 早期启动（汇编）→ kernel::main → 控制台/trap 初始化 → mm::init → 停机
+//!   arch 早期启动（汇编）→ kernel::main → 控制台/trap 初始化 → mm/fs 初始化
+//!   → RV 任务调度入口或 LA M1.5 单任务用户态入口。
 //!
 //! 后续步骤按 docs/01 §4 依次接入，都在 M1：
 //!   kalloc::init → mm::init → driver::init/arch::init/fs::init → fs::mount_init_fs
@@ -17,9 +18,9 @@
 static BOOT_LOCK: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
 
 pub(crate) mod elf;
+pub(crate) mod fs;
 pub(crate) mod mm;
 mod syscall;
-#[cfg(feature = "arch-riscv64")]
 pub(crate) mod task;
 pub(crate) mod trap;
 
@@ -94,6 +95,13 @@ pub fn main(hartid: usize, dtb_pa: usize) -> ! {
         dtb_pa,
     );
     mm::init();
+    // 专用测试在内存分配器就绪后运行，不影响默认启动路径。
+    #[cfg(all(feature = "arch-loongarch64", feature = "la-switch-test"))]
+    crate::arch::task::self_test();
+    fs::init();
+    // VirtIO-Blk 的固定 MMIO 地址目前只属于 RISC-V QEMU virt 平台。
+    #[cfg(feature = "arch-riscv64")]
+    crate::drivers::init();
     crate::log_info!("M1 paging/trap foundation OK");
     crate::log_info!("M1.5: entering user mode");
     init_user(hartid)
@@ -110,64 +118,7 @@ fn init_user(hartid: usize) -> ! {
 }
 
 #[cfg(feature = "arch-loongarch64")]
-fn init_user(_hartid: usize) -> ! {
-    // LA 保持单任务路径（W9-10 排期对齐用户态调度）。
-    init_user_legacy()
-}
-
-/// LA 单任务路径（原 M1.5 逻辑）。
-#[cfg(feature = "arch-loongarch64")]
-fn init_user_legacy() -> ! {
-    // 默认内嵌 uapp.elf；`make test-fault` 时经 feature 切换为 uapp_fault.elf
-    // （用户态访问内核保护区的独立测试程序，见 W2 附加用例 change record）。
-    #[cfg(feature = "uapp-fault-test")]
-    const UAPP_ELF: &[u8] = include_bytes!("../../build/user/uapp_fault.elf");
-    #[cfg(not(feature = "uapp-fault-test"))]
-    const UAPP_ELF: &[u8] = include_bytes!("../../build/user/uapp.elf");
-    let uapp: &[u8] = UAPP_ELF;
-    let elf = crate::kernel::elf::parse(uapp).expect("uapp ELF parse failed");
-
-    let layout = mm::kernel_space::KernelImageLayout::current();
-    let memory_bytes = mm::configured_memory_bytes();
-    let (_, memory_end) = crate::arch::mm::physical_memory_range(memory_bytes)
-        .expect("configured memory range unavailable");
-
-    // 用户栈顶固定低于内核身份映射区（RV: 内核 0x8000_0000 起）。
-    const USER_STACK_TOP: usize = 0x7f00_0000;
-    let user_stack = mm::address::AddressRange::new(
-        mm::address::VirtAddr::new(USER_STACK_TOP - 0x1000),
-        mm::address::VirtAddr::new(USER_STACK_TOP),
-    )
-    .expect("user stack range");
-
-    let mut space = mm::memory_set::MemorySet::new_user(
-        layout,
-        mm::address::VirtAddr::new(memory_end),
-        &elf.segments,
-        user_stack,
-    )
-    .expect("user MemorySet construction failed");
-    space
-        .load_elf(&elf.segments, uapp)
-        .expect("uapp segment load failed");
-
-    let kstack = mm::kernel_stack::KernelStack::new().expect("user task kernel stack");
-    let kstack_top = kstack.top();
-
-    // SAFETY: 用户页表含内核身份映射 + 用户段，切表后当前执行地址与栈仍可访问。
-    unsafe { crate::arch::mm::activate(space.root_ppn().value()) };
-
-    let context = crate::arch::trap::TrapContext::new_user(elf.entry, USER_STACK_TOP);
-    let context_ptr = (kstack_top - core::mem::size_of::<crate::arch::trap::TrapContext>())
-        as *mut crate::arch::trap::TrapContext;
-    // SAFETY: context_ptr 位于新分配内核栈顶下方，无重叠使用。
-    unsafe { context_ptr.write(context) };
-    crate::arch::trap::set_user_scratch(kstack_top);
-    crate::log_info!(
-        "M1.5: running user program entry={:#x} user_sp={:#x} kernel_stack_top={:#x}",
-        elf.entry,
-        USER_STACK_TOP,
-        kstack_top,
-    );
-    crate::arch::trap::restore_from(context_ptr)
+fn init_user(hartid: usize) -> ! {
+    // LoongArch 的资源所有权由 task 模块管理；此处只交接启动请求。
+    task::boot_tasks(hartid)
 }

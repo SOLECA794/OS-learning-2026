@@ -6,6 +6,12 @@
 
 ## [Unreleased]
 
+- 合并 yyw 分支 92bcd1c 进 master（2026-10-17，双架构全绿）：
+  - LA64 追平到 M2.8：user-trap/process/exec/上下文切换、console RX 阻塞唤醒、文件 FD/dir/file ops、pipe、单核时钟抢占、brk/mmap/munmap、COW OOM 134 点 + 128 轮回收。
+  - VFS 多后端抽象：`src/fs` → `src/kernel/fs`，对象安全 `VfsNode` trait，新增第二后端 staticfs（挂载 `/static`）。
+  - 修正 RV mmap/munmap：munmap 忽略 len 只删整区、mmap 页数误当字节数；补 errno 重复取反。
+  - VirtIO-Blk 仍处探测调试（devid=0、写 Status 不生效），磁盘禁用，不影响回归。
+- yyw 合并 `master` 的 brk、mmap、pipe/dup2、VirtIO-Blk 与仓库文档；保留 `kernel/fs` 模块边界及 LoongArch 进程/exec，双架构回归见 `kernel-project/log/change/2026-10-15-merge-master-into-yyw.md`。
 - docs: ROADMAP 重排优先级——P0 补 brk/mmap + pipe/dup2（跑真实 Linux 程序前提），LA64 从第一优先级降到 P2 集中冲刺；策略转向 Spike（BusyBox 靶子先行）
 - style: 清理 11 个 dead_code warnings + COW 引用计数 debug 防护（commit 0095e30）
   - address.rs / memory_set.rs / task / arch trap / kernel_stack / syscall 标 allow(dead_code) 并注释保留原因

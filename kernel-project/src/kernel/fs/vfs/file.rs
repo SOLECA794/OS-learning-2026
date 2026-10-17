@@ -3,15 +3,14 @@
 //! 每次 open 新建对象；dup/fork 只 clone Arc。锁顺序固定为描述偏移锁 →
 //! inode 内容锁，不在锁内访问用户内存或调用调度器。
 
-use super::ramfs::Inode;
+use super::node::NodeRef;
 use super::{
     DirectoryEntry, FileMetadata, FileType, OpenOptions, SeekWhence, EACCES, EISDIR, ENOTDIR,
 };
 use crate::klib::sync::SpinLock;
-use alloc::sync::Arc;
 
 pub(crate) struct OpenFileDesc {
-    inode: Arc<Inode>,
+    inode: NodeRef,
     offset: SpinLock<usize>,
     readable: bool,
     writable: bool,
@@ -19,7 +18,7 @@ pub(crate) struct OpenFileDesc {
 }
 
 impl OpenFileDesc {
-    pub(super) fn new(inode: Arc<Inode>, options: OpenOptions) -> Self {
+    pub(super) fn new(inode: NodeRef, options: OpenOptions) -> Self {
         Self {
             inode,
             offset: SpinLock::new(0),
@@ -60,7 +59,7 @@ impl OpenFileDesc {
     }
 
     /// VFS 内部解析相对路径的起点；不向 syscall 暴露 inode 或内部锁。
-    pub(super) fn directory_inode(&self) -> Result<Arc<Inode>, isize> {
+    pub(super) fn directory_inode(&self) -> Result<NodeRef, isize> {
         if !self.is_dir() {
             return Err(ENOTDIR);
         }

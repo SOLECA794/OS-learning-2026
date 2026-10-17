@@ -1,4 +1,4 @@
-//! execve(2)（RV，G4）：按路径从命名程序源加载新程序并一次性替换现场。
+//! execve(2)：按路径从命名程序源加载新程序并一次性替换现场。
 //!
 //! V2 §7 合同：exec 成功必须"使用新现场"，不能往旧 TrapContext 写返回值——
 //! 成功后现场被重写为（entry, argc, argv, 新栈），trap handler 返回即进新程序；
@@ -12,7 +12,8 @@ use crate::kernel::mm::address::{AddressRange, VirtAddr};
 use crate::kernel::mm::memory_set::MemorySet;
 use crate::kernel::syscall::copy_from_user;
 
-const USER_STACK_TOP: usize = 0x7f00_0000;
+/// 用户栈布局由架构层决定；exec 与首任务必须使用同一布局。
+const USER_STACK_TOP: usize = arch::task::INITIAL_USER_STACK_TOP;
 /// 用户 argv 数组最多条目数（含 NULL 结尾）。
 const MAX_ARGV: usize = 16;
 /// 单个参数字符串最大长度（含 null 终止）。
@@ -90,7 +91,7 @@ fn build_user_argv_stack(
 pub fn sys_execve(context: &mut arch::trap::TrapContext, args: [usize; 6]) -> Result<(), isize> {
     let path_bytes = super::copy_cstring_from_user(args[0], MAX_PATH_LEN)?;
     // exec 与文件打开共用 VFS 路径解析；错误返回时旧地址空间保持不变。
-    let elf_bytes = crate::fs::read_file(&path_bytes)?;
+    let elf_bytes = crate::kernel::fs::read_file(&path_bytes)?;
     let elf = elf::parse(&elf_bytes).map_err(|_| ENOEXEC)?;
 
     // 用户参数：argv 数组（args[1]）；envp（args[2]）忽略。
@@ -106,7 +107,7 @@ pub fn sys_execve(context: &mut arch::trap::TrapContext, args: [usize; 6]) -> Re
     let (_, memory_end) =
         arch::mm::physical_memory_range(memory_bytes).expect("configured memory range unavailable");
     let user_stack = AddressRange::new(
-        VirtAddr::new(USER_STACK_TOP - 0x1000),
+        VirtAddr::new(USER_STACK_TOP - arch::task::INITIAL_USER_STACK_BYTES),
         VirtAddr::new(USER_STACK_TOP),
     )
     .map_err(|_| ENOMEM)?;

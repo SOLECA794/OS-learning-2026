@@ -1,4 +1,4 @@
-//! 最小 ELF64 解析器（M1.5：仅支持静态 RV64 ET_EXEC）。
+//! 最小 ELF64 解析器（M1.5：支持当前架构的静态 ET_EXEC）。
 //!
 //! 治理裁决：最小依赖，禁止引入第三方 crate；只解析启动用户程序所需的字段。
 
@@ -7,7 +7,11 @@ use core::mem::size_of;
 
 const ELF_MAGIC: [u8; 4] = [0x7f, b'E', b'L', b'F'];
 const ELFCLASS64: u8 = 2;
+/// ELF e_machine 必须匹配当前内核目标架构，不能把另一架构指令当作用户程序。
+#[cfg(feature = "arch-riscv64")]
 const EM_RISCV: u16 = 243;
+#[cfg(feature = "arch-loongarch64")]
+const EM_LOONGARCH: u16 = 258;
 const ET_EXEC: u16 = 2;
 const PT_LOAD: u32 = 1;
 
@@ -94,7 +98,11 @@ pub fn parse(data: &[u8]) -> Result<Elf, ElfError> {
     if ehdr.e_ident[4] != ELFCLASS64 {
         return Err(ElfError::BadClass);
     }
-    if ehdr.e_machine != EM_RISCV {
+    #[cfg(feature = "arch-riscv64")]
+    const EXPECTED_MACHINE: u16 = EM_RISCV;
+    #[cfg(feature = "arch-loongarch64")]
+    const EXPECTED_MACHINE: u16 = EM_LOONGARCH;
+    if ehdr.e_machine != EXPECTED_MACHINE {
         return Err(ElfError::BadMachine);
     }
     if ehdr.e_type != ET_EXEC {

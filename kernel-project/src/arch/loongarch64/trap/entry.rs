@@ -1,7 +1,7 @@
 //! LoongArch64 普通异常汇编保存/恢复路径。
 //!
-//! 当前入口可在分页激活后的内核地址空间运行，但仍只使用发生 trap 时的当前栈。
-//! 用户态落地后必须切换到当前 Task 的内核栈；中断使能属于后续阶段。
+//! SAVE0 协议：用户态运行时为内核栈顶；内核态运行时为 0。
+//! 入口只用 `$r3` 与 SAVE0 交换，避免在保存通用寄存器前覆盖用户现场。
 
 use core::arch::global_asm;
 
@@ -12,13 +12,26 @@ global_asm!(r#"
     .p2align 12
     .globl __loongarch64_trap_entry
 __loongarch64_trap_entry:
+    # 用户来源：r3 换成内核栈顶，SAVE0 暂存用户 sp。
+    # 内核来源：SAVE0 为 0，立即交换回来，继续用原内核栈。
+    csrwr $r3, 0x30
+    beqz $r3, .Lkernel_origin
     addi.d $r3, $r3, -{frame_size}
-    st.d $r0, $r3, 0
-    st.d $r1, $r3, 8
-    st.d $r2, $r3, 16
+    st.d $r12, $r3, 96
+    csrrd $r12, 0x30
+    st.d $r12, $r3, 24
+    csrwr $r0, 0x30
+    b .Lframe_ready
+.Lkernel_origin:
+    csrwr $r3, 0x30
+    addi.d $r3, $r3, -{frame_size}
     st.d $r12, $r3, 96
     addi.d $r12, $r3, {frame_size}
     st.d $r12, $r3, 24
+.Lframe_ready:
+    st.d $r0, $r3, 0
+    st.d $r1, $r3, 8
+    st.d $r2, $r3, 16
     st.d $r4, $r3, 32
     st.d $r5, $r3, 40
     st.d $r6, $r3, 48
@@ -56,6 +69,15 @@ __loongarch64_trap_entry:
     st.d $r12, $r3, 280
     addi.d $r4, $r3, 0
     bl kernel_trap_handler
+    .globl __loongarch64_trap_restore
+__loongarch64_trap_restore:
+    # 返回用户态前重新发布内核栈顶；内核来源保持 SAVE0=0。
+    ld.d $r12, $r3, 256
+    andi $r12, $r12, 3
+    beqz $r12, .Lrestore_regs
+    addi.d $r12, $r3, {frame_size}
+    csrwr $r12, 0x30
+.Lrestore_regs:
     ld.d $r12, $r3, 256
     csrwr $r12, 0x1
     ld.d $r12, $r3, 264
